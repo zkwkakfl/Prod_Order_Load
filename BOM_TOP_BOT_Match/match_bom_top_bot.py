@@ -516,7 +516,7 @@ def run_gui() -> None:
     """tkinter 폼: BOM/TOP/BOT 파일·시트·범위 선택 후 매칭 실행."""
     root = tk.Tk()
     root.title("BOM / TOP / BOT 매칭")
-    root.geometry("820x760")
+    root.geometry("820x700")
     root.resizable(True, True)
 
     main_frame = ttk.Frame(root, padding=12)
@@ -608,51 +608,27 @@ def run_gui() -> None:
             messagebox.showerror("오류", f"파일을 찾을 수 없습니다: {full_path}")
             return
         target = double_click_target.get()
-        path_vars[target].set(full_path)
+        path_var = path_vars[target]
+        path_var.set(full_path)
         combo = sheet_combos.get(target)
         if combo:
             names = _get_sheet_names(full_path)
             combo["values"] = names
             if names:
                 combo.set(names[0])
+        if _EXCEL_COM_AVAILABLE:
+            try:
+                open_in_excel(path_var, target)
+            except Exception as e:
+                messagebox.showerror("엑셀 열기 오류", str(e))
 
     file_listbox.bind("<Double-Button-1>", on_file_double_click)
 
-    ttk.Label(main_frame, text="BOM 파일:").grid(row=3, column=0, sticky=tk.W, pady=2)
-    ttk.Entry(main_frame, textvariable=bom_path_var, width=38).grid(row=3, column=1, padx=4, pady=2)
-    btn_bom_excel = ttk.Button(
-        main_frame, text="엑셀에서 열기",
-        command=lambda: open_in_excel(bom_path_var, "bom"),
-    )
-    btn_bom_excel.grid(row=3, column=2, padx=2, pady=2)
-    if not _EXCEL_COM_AVAILABLE:
-        btn_bom_excel.state(["disabled"])
-
-    ttk.Label(main_frame, text="TOP 파일:").grid(row=4, column=0, sticky=tk.W, pady=2)
-    ttk.Entry(main_frame, textvariable=top_path_var, width=38).grid(row=4, column=1, padx=4, pady=2)
-    btn_top_excel = ttk.Button(
-        main_frame, text="엑셀에서 열기",
-        command=lambda: open_in_excel(top_path_var, "top"),
-    )
-    btn_top_excel.grid(row=4, column=2, padx=2, pady=2)
-    if not _EXCEL_COM_AVAILABLE:
-        btn_top_excel.state(["disabled"])
-
-    ttk.Label(main_frame, text="BOT 파일:").grid(row=5, column=0, sticky=tk.W, pady=2)
-    ttk.Entry(main_frame, textvariable=bot_path_var, width=38).grid(row=5, column=1, padx=4, pady=2)
-    btn_bot_excel = ttk.Button(
-        main_frame, text="엑셀에서 열기",
-        command=lambda: open_in_excel(bot_path_var, "bot"),
-    )
-    btn_bot_excel.grid(row=5, column=2, padx=2, pady=2)
-    if not _EXCEL_COM_AVAILABLE:
-        btn_bot_excel.state(["disabled"])
-
     ttk.Label(main_frame, text="저장 경로 (비우면 BOM과 같은 폴더에 _matched.xlsx):").grid(
-        row=6, column=0, sticky=tk.W, pady=2
+        row=3, column=0, sticky=tk.W, pady=2
     )
     output_path_var = tk.StringVar()
-    ttk.Entry(main_frame, textvariable=output_path_var, width=38).grid(row=6, column=1, padx=4, pady=2)
+    ttk.Entry(main_frame, textvariable=output_path_var, width=38).grid(row=3, column=1, padx=4, pady=2)
 
     def browse_output():
         path = filedialog.asksaveasfilename(
@@ -663,11 +639,11 @@ def run_gui() -> None:
         if path:
             output_path_var.set(path)
 
-    ttk.Button(main_frame, text="찾아보기", command=browse_output).grid(row=6, column=2, pady=2)
+    ttk.Button(main_frame, text="찾아보기", command=browse_output).grid(row=3, column=2, pady=2)
 
-    ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=7, column=0, columnspan=4, sticky=tk.EW, pady=10)
+    ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=4, sticky=tk.EW, pady=10)
     ttk.Label(main_frame, text="시트 및 범위 (직접 입력 또는 엑셀에서 범위 선택 후 '가져오기'):").grid(
-        row=8, column=0, columnspan=4, sticky=tk.W
+        row=5, column=0, columnspan=4, sticky=tk.W
     )
 
     bom_sheet_var = tk.StringVar()
@@ -712,20 +688,20 @@ def run_gui() -> None:
     sheet_combos["top"] = top_sheet_combo
     sheet_combos["bot"] = bot_sheet_combo
 
-    _grid_section(9, "BOM 시트", bom_sheet_combo, bom_sheet_var, bom_mat_var, bom_coord_var, bom_qty_var, "bom")
-    _grid_section(13, "TOP 시트", top_sheet_combo, top_sheet_var, top_mat_var, top_coord_var, top_qty_var, "top")
-    _grid_section(17, "BOT 시트", bot_sheet_combo, bot_sheet_var, bot_mat_var, bot_coord_var, bot_qty_var, "bot")
+    _grid_section(6, "BOM 시트", bom_sheet_combo, bom_sheet_var, bom_mat_var, bom_coord_var, bom_qty_var, "bom")
+    _grid_section(10, "TOP 시트", top_sheet_combo, top_sheet_var, top_mat_var, top_coord_var, top_qty_var, "top")
+    _grid_section(14, "BOT 시트", bot_sheet_combo, bot_sheet_var, bot_mat_var, bot_coord_var, bot_qty_var, "bot")
 
     material_only_match_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
         main_frame,
         text="자재명 기준 매칭 (BOM 수량 vs TOP+BOT 총수량)",
         variable=material_only_match_var,
-    ).grid(row=21, column=0, columnspan=3, sticky=tk.W, pady=4)
+    ).grid(row=18, column=0, columnspan=3, sticky=tk.W, pady=4)
     case_insensitive_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(
         main_frame, text="좌표/자재 대소문자 무시", variable=case_insensitive_var
-    ).grid(row=22, column=0, columnspan=3, sticky=tk.W, pady=4)
+    ).grid(row=19, column=0, columnspan=3, sticky=tk.W, pady=4)
 
     def run_match_from_gui() -> None:
         bom_path = bom_path_var.get().strip()
@@ -786,7 +762,7 @@ def run_gui() -> None:
             messagebox.showerror("오류", err_msg)
 
     ttk.Button(main_frame, text="매칭 실행", command=run_match_from_gui).grid(
-        row=23, column=1, columnspan=2, pady=12
+        row=20, column=1, columnspan=2, pady=12
     )
 
     root.mainloop()
