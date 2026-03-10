@@ -557,7 +557,11 @@ def run_gui() -> None:
             excel_state[f"{key}_wb"] = wb
             app.Visible = True
             wb.Activate()
-            messagebox.showinfo("안내", "엑셀에서 파일이 열렸습니다.\n시트를 선택한 뒤 범위를 드래그하고, '가져오기'를 누르세요.")
+            messagebox.showinfo(
+                "안내",
+                "엑셀에서 파일이 열렸습니다.\n"
+                "범위는 시트/범위 영역의 해당 입력란을 더블클릭한 뒤, 엑셀에서 드래그로 선택하고 확인을 누르세요.",
+            )
         except Exception as e:
             messagebox.showerror("엑셀 열기 오류", str(e))
 
@@ -574,6 +578,53 @@ def run_gui() -> None:
         except Exception as e:
             messagebox.showerror("범위 가져오기 오류", str(e))
 
+    def open_range_picker_dialog(
+        parent: tk.Widget,
+        wb_key: str,
+        range_var: tk.StringVar,
+        sheet_var: tk.StringVar,
+        range_name: str,
+    ) -> None:
+        """VBA 유저폼 방식: 범위 입력란 더블클릭 시 안내 라벨이 있는 작은 대화상자 → 엑셀에서 선택 후 확인."""
+        app = excel_state.get("app")
+        wb = excel_state.get(f"{wb_key}_wb")
+        if not app or not wb:
+            messagebox.showwarning(
+                "안내",
+                "먼저 해당 파일을 리스트에서 더블클릭하여 엑셀에서 열어 주세요.",
+            )
+            return
+        dlg = tk.Toplevel(parent)
+        dlg.title("범위 선택")
+        dlg.geometry("420x130")
+        dlg.resizable(False, False)
+        msg = f"엑셀에서 {range_name} 범위를 드래그로 선택한 뒤 확인을 누르세요."
+        ttk.Label(dlg, text=msg, wraplength=380).pack(pady=20, padx=20, fill=tk.X)
+        def on_confirm() -> None:
+            try:
+                sheet_name, addr = _excel_get_selection(app, wb)
+                sheet_var.set(sheet_name)
+                range_var.set(addr)
+                dlg.destroy()
+            except Exception as e:
+                messagebox.showerror("범위 가져오기 오류", str(e))
+        def on_cancel() -> None:
+            dlg.destroy()
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(pady=8)
+        ttk.Button(btn_frame, text="확인", command=on_confirm).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="취소", command=on_cancel).pack(side=tk.LEFT, padx=4)
+        dlg.bind("<Return>", lambda e: on_confirm())
+        dlg.bind("<Escape>", lambda e: on_cancel())
+        try:
+            app.Visible = True
+            wb.Activate()
+        except Exception:
+            pass
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.focus_set()
+
     # 폴더 선택 → 리스트박스 → 더블클릭으로 BOM/TOP/BOT 파일 지정
     folder_path_var = tk.StringVar()
     bom_path_var = tk.StringVar()
@@ -585,13 +636,13 @@ def run_gui() -> None:
 
     def browse_folder() -> None:
         folder = filedialog.askdirectory(title="BOM/TOP/BOT 파일이 있는 폴더 선택")
-        if not folder:
+        if not folder or not os.path.isdir(folder):
             return
         folder_path_var.set(folder)
         file_listbox.delete(0, tk.END)
         for ext in ("*.xlsx", "*.xlsm"):
-            for path in sorted(glob.glob(os.path.join(folder, ext))):
-                file_listbox.insert(tk.END, os.path.basename(path))
+            for p in sorted(glob.glob(os.path.join(folder, ext))):
+                file_listbox.insert(tk.END, os.path.basename(p))
 
     ttk.Button(main_frame, text="폴더 선택", command=browse_folder).grid(row=0, column=2, pady=2)
 
@@ -664,7 +715,7 @@ def run_gui() -> None:
     ttk.Button(main_frame, text="찾아보기", command=browse_output).grid(row=3, column=2, pady=2)
 
     ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=4, column=0, columnspan=4, sticky=tk.EW, pady=10)
-    ttk.Label(main_frame, text="시트 및 범위 (직접 입력 또는 엑셀에서 범위 선택 후 '가져오기'):").grid(
+    ttk.Label(main_frame, text="시트 및 범위 (직접 입력 또는 범위 입력란 더블클릭 → 엑셀에서 선택 후 확인):").grid(
         row=5, column=0, columnspan=4, sticky=tk.W
     )
 
@@ -681,27 +732,39 @@ def run_gui() -> None:
     bot_coord_var = tk.StringVar(value="C2:C200")
     bot_qty_var = tk.StringVar(value="D2:D200")
 
-    def _grid_section(r, label, combo_widget, sheet_var, mat_var, coord_var, qty_var, wb_key: str):
+    def _grid_section(r, label, combo_widget, sheet_var, mat_var, coord_var, qty_var, wb_key: str) -> None:
         ttk.Label(main_frame, text=label).grid(row=r, column=0, sticky=tk.W, pady=2)
         combo_widget.grid(row=r, column=1, padx=4, pady=2)
         ttk.Label(main_frame, text="자재범위").grid(row=r + 1, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(main_frame, textvariable=mat_var, width=20).grid(row=r + 1, column=1, padx=4, pady=2)
-        btn_mat = ttk.Button(main_frame, text="가져오기", width=8, command=lambda: get_selection_and_apply(wb_key, sheet_var, mat_var))
-        btn_mat.grid(row=r + 1, column=2, padx=2, pady=2)
-        if not _EXCEL_COM_AVAILABLE:
-            btn_mat.state(["disabled"])
+        entry_mat = ttk.Entry(main_frame, textvariable=mat_var, width=20)
+        entry_mat.grid(row=r + 1, column=1, padx=4, pady=2)
+        if _EXCEL_COM_AVAILABLE:
+            entry_mat.bind(
+                "<Double-Button-1>",
+                lambda e, k=wb_key, sv=sheet_var, rv=mat_var: open_range_picker_dialog(
+                    main_frame, k, rv, sv, "자재 범위"
+                ),
+            )
         ttk.Label(main_frame, text="좌표범위").grid(row=r + 2, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(main_frame, textvariable=coord_var, width=20).grid(row=r + 2, column=1, padx=4, pady=2)
-        btn_coord = ttk.Button(main_frame, text="가져오기", width=8, command=lambda: get_selection_and_apply(wb_key, sheet_var, coord_var))
-        btn_coord.grid(row=r + 2, column=2, padx=2, pady=2)
-        if not _EXCEL_COM_AVAILABLE:
-            btn_coord.state(["disabled"])
+        entry_coord = ttk.Entry(main_frame, textvariable=coord_var, width=20)
+        entry_coord.grid(row=r + 2, column=1, padx=4, pady=2)
+        if _EXCEL_COM_AVAILABLE:
+            entry_coord.bind(
+                "<Double-Button-1>",
+                lambda e, k=wb_key, sv=sheet_var, rv=coord_var: open_range_picker_dialog(
+                    main_frame, k, rv, sv, "좌표 범위"
+                ),
+            )
         ttk.Label(main_frame, text="수량범위").grid(row=r + 3, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(main_frame, textvariable=qty_var, width=20).grid(row=r + 3, column=1, padx=4, pady=2)
-        btn_qty = ttk.Button(main_frame, text="가져오기", width=8, command=lambda: get_selection_and_apply(wb_key, sheet_var, qty_var))
-        btn_qty.grid(row=r + 3, column=2, padx=2, pady=2)
-        if not _EXCEL_COM_AVAILABLE:
-            btn_qty.state(["disabled"])
+        entry_qty = ttk.Entry(main_frame, textvariable=qty_var, width=20)
+        entry_qty.grid(row=r + 3, column=1, padx=4, pady=2)
+        if _EXCEL_COM_AVAILABLE:
+            entry_qty.bind(
+                "<Double-Button-1>",
+                lambda e, k=wb_key, sv=sheet_var, rv=qty_var: open_range_picker_dialog(
+                    main_frame, k, rv, sv, "수량 범위"
+                ),
+            )
 
     bom_sheet_combo = ttk.Combobox(main_frame, textvariable=bom_sheet_var, width=20)
     top_sheet_combo = ttk.Combobox(main_frame, textvariable=top_sheet_var, width=20)
