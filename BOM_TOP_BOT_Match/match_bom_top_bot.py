@@ -30,10 +30,19 @@ def _excel_open_file(abs_path: str, app=None):
     abs_path = os.path.abspath(abs_path)
     if not os.path.exists(abs_path):
         raise FileNotFoundError(abs_path)
+    # 기존 app이 유효한지 검사 (사용자가 엑셀을 닫으면 COM 참조가 무효화됨)
+    if app is not None:
+        try:
+            _ = app.Workbooks
+            app.Visible = True
+        except Exception:
+            app = None
     if app is None:
         app = win32com.client.Dispatch("Excel.Application")
         app.Visible = True
     wb = app.Workbooks.Open(abs_path)
+    app.Visible = True
+    wb.Activate()
     return app, wb
 
 
@@ -532,9 +541,22 @@ def run_gui() -> None:
             return
         try:
             existing_app = excel_state.get("app")
+            # 기존 엑셀 인스턴스 유효성 검사 (닫힌 경우 무효화)
+            if existing_app is not None:
+                try:
+                    _ = existing_app.Workbooks
+                    existing_app.Visible = True
+                except Exception:
+                    existing_app = None
+                    excel_state["app"] = None
+                    excel_state["bom_wb"] = None
+                    excel_state["top_wb"] = None
+                    excel_state["bot_wb"] = None
             app, wb = _excel_open_file(path, existing_app)
             excel_state["app"] = app
             excel_state[f"{key}_wb"] = wb
+            app.Visible = True
+            wb.Activate()
             messagebox.showinfo("안내", "엑셀에서 파일이 열렸습니다.\n시트를 선택한 뒤 범위를 드래그하고, '가져오기'를 누르세요.")
         except Exception as e:
             messagebox.showerror("엑셀 열기 오류", str(e))
