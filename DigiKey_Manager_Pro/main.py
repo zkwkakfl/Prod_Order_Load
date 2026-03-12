@@ -18,6 +18,9 @@ from database import PartDatabase
 SIMILAR_PARTS_MIN_RATIO = 0.6
 SIMILAR_PARTS_MAX_COUNT = 10
 
+# 컬럼 선택 다이얼로그: 표 형태 미리보기에 표시할 최대 행 수
+COLUMN_PREVIEW_MAX_ROWS = 20
+
 
 class DigikeyViewerApp:
     """메인 애플리케이션 클래스"""
@@ -530,6 +533,71 @@ class DigikeyViewerApp:
         
         return False
     
+    def _normalize_mounting_to_smt_imt(self, value: str) -> str:
+        """
+        API 장착유형 문자열을 엑셀용 코드로 변환.
+        표면실장 → "SMT", 스루홀 → "IMT", 그 외 → "".
+        """
+        if not value or not isinstance(value, str):
+            return ""
+        v = value.strip().lower()
+        if not v or v in ('n/a', 'nan'):
+            return ""
+        if 'surface' in v or 'smt' in v or v == 'smt':
+            return "SMT"
+        if 'through' in v or 'thru' in v or 'through-hole' in v or '스루홀' in v or v == 'imt':
+            return "IMT"
+        return ""
+    
+    def _find_part_type_column(self) -> str | None:
+        """시트에서 '자재 유형' 컬럼을 찾아 이름 반환. 없으면 None."""
+        if self.current_df is None or self.current_df.empty:
+            return None
+        candidates = ['자재 유형', '자재유형', '유형', '부품유형', 'Part Type', '자재유형 ']
+        for col in self.current_df.columns:
+            c = str(col).strip()
+            if not c:
+                continue
+            if c in candidates:
+                return col
+            if '자재' in c and '유형' in c:
+                return col
+        return None
+    
+    def _is_chip_resistor_row(self, row_index: int, part_type_col: str | None) -> bool:
+        """해당 행의 자재 유형이 '칩저항'인지 여부. (조회 안 된 항목 중 칩저항만 SMT 처리용)"""
+        if part_type_col is None or self.current_df is None:
+            return False
+        try:
+            val = self.current_df.iloc[row_index].get(part_type_col, "")
+            return "칩저항" in str(val).strip()
+        except Exception:
+            return False
+    
+    def _apply_mounting_column_to_sheet(self, part_number_col: str, query_results: list):
+        """
+        조회 결과를 반영해 current_df에 '장착유형' 열을 파트넘버 열 오른쪽에 삽입/갱신.
+        값: 조회 성공 시 SMT/IMT, 조회 실패 시 자재 유형이 칩저항이면 SMT, 아니면 빈 문자열.
+        """
+        if self.current_df is None or not query_results:
+            return
+        part_type_col = self._find_part_type_column()
+        mapping = {}
+        for r in query_results:
+            idx = r['Row']
+            full = r.get('FullData') or {}
+            if not self.is_query_failed(full):
+                mapping[idx] = self._normalize_mounting_to_smt_imt(r.get('MountingType', '') or '')
+            else:
+                mapping[idx] = "SMT" if self._is_chip_resistor_row(idx, part_type_col) else ""
+        series = pd.Series(mapping).reindex(self.current_df.index, fill_value="")
+        col_name = "장착유형"
+        if col_name in self.current_df.columns:
+            self.current_df.drop(columns=[col_name], inplace=True)
+        col_pos = self.current_df.columns.get_loc(part_number_col)
+        self.current_df.insert(col_pos + 1, col_name, series)
+        self.display_sheet_data()
+    
     def _similarity_ratio(self, a: str, b: str) -> float:
         """두 문자열의 유사도 반환 (0~1). 대소문자 무시."""
         if not a or not b:
@@ -933,37 +1001,72 @@ class DigikeyViewerApp:
         
         return None
     
+    def _fill_treeview_from_df(self, tree, df, max_rows=None):
+        """
+        DataFrame 내용으로 Treeview를 채움 (미리보기용).
+        max_rows가 지정되면 상위 N행만 표시.
+        """
+        for item in tree.get_children():
+            tree.delete(item)
+        if df is None or df.empty:
+            return
+        cols = list(df.columns)
+        tree["columns"] = cols
+        tree["show"] = "headings"
+        for c in cols:
+            tree.heading(c, text=str(c))
+            tree.column(c, width=120, anchor=tk.W)
+        subset = df.head(max_rows) if max_rows else df
+        for index, row in subset.iterrows():
+            values = [str(val) for val in row.values]
+            tree.insert("", tk.END, values=values)
+
     def select_part_number_column(self):
-        """사용자에게 파트넘버 컬럼 선택하게 함"""
+        """사용자에게 파트넘버 컬럼 선택하게 함 (표 형태 미리보기 포함)"""
         if self.current_df is None or self.current_df.empty:
             return None
         
         columns = list(self.current_df.columns)
         
-        # 컬럼 선택 다이얼로그
+        # 컬럼 선택 다이얼로그 (미리보기 영역 포함으로 크기 확대)
         col_window = tk.Toplevel(self.root)
         col_window.title("파트넘버 컬럼 선택")
-        col_window.geometry("350x200")
+        col_window.geometry("680x480")
         col_window.transient(self.root)
         col_window.grab_set()
         col_window.focus_set()
         
-        # 창 중앙 배치
-        col_window.update_idletasks()
-        x = (col_window.winfo_screenwidth() // 2) - (col_window.winfo_width() // 2)
-        y = (col_window.winfo_screenheight() // 2) - (col_window.winfo_height() // 2)
-        col_window.geometry(f"+{x}+{y}")
+        main_frm = ttk.Frame(col_window, padding="10")
+        main_frm.pack(fill=tk.BOTH, expand=True)
         
-        ttk.Label(col_window, text="파트넘버 컬럼을 선택하세요:", font=("Arial", 10, "bold")).pack(pady=10)
+        ttk.Label(main_frm, text="파트넘버 컬럼을 선택하세요 (아래 표에서 확인):", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
         
         col_var = tk.StringVar()
         if columns:
             col_var.set(columns[0])
+        row_sel = ttk.Frame(main_frm)
+        row_sel.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(row_sel, text="컬럼:").pack(side=tk.LEFT, padx=(0, 5))
+        col_combo = ttk.Combobox(row_sel, textvariable=col_var, values=columns, state="readonly", width=40)
+        col_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        col_combo = ttk.Combobox(col_window, textvariable=col_var, values=columns, state="readonly", width=30)
-        col_combo.pack(pady=10)
+        # 표 형태 미리보기 (A: 앱 내 테이블)
+        preview_frm = ttk.LabelFrame(main_frm, text="시트 미리보기 (상위 {}행)".format(COLUMN_PREVIEW_MAX_ROWS), padding="5")
+        preview_frm.pack(fill=tk.BOTH, expand=True, pady=5)
+        prev_tree = ttk.Treeview(preview_frm, height=12, show="headings", selectmode="none")
+        scroll_y = ttk.Scrollbar(preview_frm)
+        scroll_x = ttk.Scrollbar(preview_frm, orient=tk.HORIZONTAL)
+        prev_tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        scroll_y.configure(command=prev_tree.yview)
+        scroll_x.configure(command=prev_tree.xview)
+        prev_tree.grid(row=0, column=0, sticky="nsew")
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        preview_frm.columnconfigure(0, weight=1)
+        preview_frm.rowconfigure(0, weight=1)
+        self._fill_treeview_from_df(prev_tree, self.current_df, max_rows=COLUMN_PREVIEW_MAX_ROWS)
         
-        selected_col = [None]  # 리스트로 감싸서 클로저에서 수정 가능하게
+        selected_col = [None]
         
         def confirm():
             selected_col[0] = col_var.get()
@@ -972,14 +1075,19 @@ class DigikeyViewerApp:
         def cancel():
             col_window.destroy()
         
-        button_frame = ttk.Frame(col_window)
-        button_frame.pack(pady=20)
+        btn_frm = ttk.Frame(main_frm)
+        btn_frm.pack(pady=10)
+        ttk.Button(btn_frm, text="확인", command=confirm, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frm, text="취소", command=cancel, width=12).pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(button_frame, text="확인", command=confirm, width=12).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="취소", command=cancel, width=12).pack(side=tk.LEFT, padx=5)
+        # 창 중앙 배치
+        col_window.update_idletasks()
+        w, h = 680, 480
+        x = (col_window.winfo_screenwidth() // 2) - (w // 2)
+        y = (col_window.winfo_screenheight() // 2) - (h // 2)
+        col_window.geometry(f"{w}x{h}+{x}+{y}")
         
-        col_window.wait_window()  # 다이얼로그가 닫힐 때까지 대기
-        
+        col_window.wait_window()
         return selected_col[0]
     
     def query_parts_from_row(self, start_row, part_number_col):
@@ -1117,6 +1225,7 @@ class DigikeyViewerApp:
                     })
             
             self.query_results = query_results
+            self._apply_mounting_column_to_sheet(part_number_col, query_results)
             self.display_query_results()
             
             # 조회 탭으로 전환
@@ -1173,13 +1282,19 @@ class DigikeyViewerApp:
         self.tree2.column('Manufacturer', width=200, anchor=tk.W)
         self.tree2.column('MountingType', width=150, anchor=tk.W)
         
-        # 데이터 삽입
+        # 데이터 삽입 (장착유형: 시트와 동일하게 SMT/IMT/조회실패 표시)
+        part_type_col = self._find_part_type_column()
         for i, result in enumerate(self.query_results):
+            full = result.get('FullData') or {}
+            if not self.is_query_failed(full):
+                mt_display = self._normalize_mounting_to_smt_imt(result.get('MountingType', '') or '') or result.get('MountingType', 'N/A')
+            else:
+                mt_display = "SMT" if self._is_chip_resistor_row(result['Row'], part_type_col) else "조회 실패"
             values = [
                 str(result['Row']),
                 result['PartNumber'],
                 result['Manufacturer'],
-                result['MountingType']
+                mt_display
             ]
             self.tree2.insert("", tk.END, values=values, iid=i)
     

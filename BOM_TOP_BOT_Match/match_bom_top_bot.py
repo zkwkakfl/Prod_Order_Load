@@ -207,6 +207,34 @@ def build_sheet_data(
     return sd
 
 
+def merge_sheet_data(top: SheetData, bot: SheetData, *, label: str = "TOP+BOT") -> SheetData:
+    """TOP과 BOT 시트 데이터를 하나로 합쳐, BOM과의 단일 매칭에 사용할 보드 데이터를 만든다."""
+    merged = SheetData(label=label, sheet_name=f"{top.sheet_name}+{bot.sheet_name}")
+
+    for key in set(top.key_to_qty) | set(bot.key_to_qty):
+        q = top.key_to_qty.get(key, 0.0) + bot.key_to_qty.get(key, 0.0)
+        if q > 0:
+            merged.key_to_qty[key] = q
+        merged.key_to_rows[key] = (
+            top.key_to_rows.get(key, []) + bot.key_to_rows.get(key, [])
+        )
+
+    for coord in set(top.coord_to_count) | set(bot.coord_to_count):
+        merged.coord_to_count[coord] = top.coord_to_count.get(coord, 0) + bot.coord_to_count.get(coord, 0)
+        merged.coord_to_rows[coord] = top.coord_to_rows.get(coord, []) + bot.coord_to_rows.get(coord, [])
+        merged.coord_to_material_counts[coord] = {}
+        for mat, cnt in top.coord_to_material_counts.get(coord, {}).items():
+            merged.coord_to_material_counts[coord][mat] = merged.coord_to_material_counts[coord].get(mat, 0) + cnt
+        for mat, cnt in bot.coord_to_material_counts.get(coord, {}).items():
+            merged.coord_to_material_counts[coord][mat] = merged.coord_to_material_counts[coord].get(mat, 0) + cnt
+
+    for mat in set(top.material_to_qty) | set(bot.material_to_qty):
+        merged.material_to_qty[mat] = top.material_to_qty.get(mat, 0.0) + bot.material_to_qty.get(mat, 0.0)
+
+    merged.qty_mismatch_rows = list(top.qty_mismatch_rows) + list(bot.qty_mismatch_rows)
+    return merged
+
+
 def compute_status(in_bom: bool, in_board: bool, bom_qty: float, board_qty: float) -> str:
     """상태 한글 반환: 한눈에 알아보기 쉽게."""
     if in_bom and in_board:
@@ -218,6 +246,63 @@ def compute_status(in_bom: bool, in_board: bool, bom_qty: float, board_qty: floa
     if (not in_bom) and in_board:
         return "TOP/BOT에만 있음"
     return "알 수 없음"
+
+
+def _error_type_coord_mode(status: str, in_bom: bool, in_board: bool, mat: str, bom: SheetData, top_bot: SheetData) -> str:
+    """좌표+자재 기준 매칭 시 상태 → 불일치 유형 (좌표_미매칭 / 자재_미매칭 / 수량_불일치)."""
+    if status == "수량 불일치":
+        return "수량_불일치"
+    if status == "TOP/BOT에 없음":  # BOM에만 있음
+        return "자재_미매칭" if mat not in top_bot.material_to_qty else "좌표_미매칭"
+    if status == "TOP/BOT에만 있음":  # 보드에만 있음
+        return "자재_미매칭" if mat not in bom.material_to_qty else "좌표_미매칭"
+    return "기타"
+
+
+def _build_error_rows_material(
+    match_rows: List[List[object]],
+    bom: SheetData,
+    top_bot: SheetData,
+    *,
+    status_idx: int,
+    error_type_quantity: str,
+    error_type_material: str,
+) -> List[List[object]]:
+    """자재 기준 매칭 시 에러 데이터 행 생성. 불일치_유형 포함."""
+    rows: List[List[object]] = []
+    for r in match_rows:
+        if r[status_idx] == "일치":
+            continue
+        mat = r[0]
+        status = r[status_idx]
+        err_type = "수량_불일치" if status == "수량 불일치" else error_type_material
+        coords_bom = sorted({coord for (coord, m) in bom.key_to_qty if m == mat})
+        coords_board = sorted({coord for (coord, m) in top_bot.key_to_qty if m == mat})
+        coord_list = sorted(set(coords_bom) | set(coords_board))
+        coord_str = ", ".join(coord_list) if coord_list else "-"
+        rows.append([err_type, coord_str, mat, r[1], r[4], status])
+    return rows
+
+
+def _build_error_rows_coord(
+    match_rows: List[List[object]],
+    bom: SheetData,
+    top_bot: SheetData,
+    *,
+    status_idx: int,
+) -> List[List[object]]:
+    """좌표+자재 기준 매칭 시 에러 데이터 행 생성. 불일치_유형(좌표/자재/수량) 포함."""
+    rows: List[List[object]] = []
+    for r in match_rows:
+        if r[status_idx] == "일치":
+            continue
+        coord, mat = r[1], r[2]
+        status = r[status_idx]
+        in_bom = (coord, mat) in bom.key_to_qty
+        in_tb = (coord, mat) in top_bot.key_to_qty
+        err_type = _error_type_coord_mode(status, in_bom, in_tb, mat, bom, top_bot)
+        rows.append([err_type, coord, mat, r[3], r[6], status])
+    return rows
 
 
 def ensure_fresh_sheet(wb, name: str):
@@ -347,104 +432,92 @@ def run_match(config: dict) -> str:
             case_insensitive=case_insensitive,
         )
 
+    # TOP과 BOT을 하나로 합쳐 BOM과만 매칭 (TOP/BOT 따로 보지 않음)
+    top_bot = merge_sheet_data(top, bot)
+
     if material_only_match:
-        # 자재명 기준: BOM 수량 vs TOP+BOT 총수량 매칭 (좌표는 TOP/BOT에 나뉘어 있어도 자재별 합으로 비교)
-        all_materials = set(bom.material_to_qty) | set(top.material_to_qty) | set(bot.material_to_qty)
+        # 자재명 기준: BOM 수량 vs (TOP+BOT 합산) 수량 매칭
+        all_materials = set(bom.material_to_qty) | set(top_bot.material_to_qty)
         match_rows = []
-        unmatched_top_rows = []
-        unmatched_bot_rows = []
         ok_count = 0
-        unmatched_top_count = 0
-        unmatched_bot_count = 0
         for mat in sorted(all_materials):
             q_b = bom.material_to_qty.get(mat, 0.0)
             q_t = top.material_to_qty.get(mat, 0.0)
             q_bo = bot.material_to_qty.get(mat, 0.0)
-            q_tb = q_t + q_bo
+            q_tb = top_bot.material_to_qty.get(mat, 0.0)
             in_b = mat in bom.material_to_qty
-            in_t = mat in top.material_to_qty
-            in_bo = mat in bot.material_to_qty
-            status = compute_status(in_b, (in_t or in_bo), q_b, q_tb)
-            status_top = compute_status(in_b, in_t, q_b, q_t)
-            status_bot = compute_status(in_b, in_bo, q_b, q_bo)
+            in_tb = mat in top_bot.material_to_qty
+            status = compute_status(in_b, in_tb, q_b, q_tb)
             row = [
                 mat, q_b, q_t, q_bo, q_tb,
-                "Y" if in_b else "", "Y" if in_t else "", "Y" if in_bo else "",
+                "Y" if in_b else "", "Y" if in_tb else "",
                 status,
             ]
             match_rows.append(row)
             if status == "일치":
                 ok_count += 1
-            if status_top != "일치" and (in_b or in_t):
-                unmatched_top_count += 1
-                unmatched_top_rows.append([mat, q_b, q_t, "Y" if in_b else "", "Y" if in_t else "", status_top])
-            if status_bot != "일치" and (in_b or in_bo):
-                unmatched_bot_count += 1
-                unmatched_bot_rows.append([mat, q_b, q_bo, "Y" if in_b else "", "Y" if in_bo else "", status_bot])
-        match_headers = ["자재", "BOM수량", "TOP수량", "BOT수량", "TOP+BOT수량", "BOM여부", "TOP여부", "BOT여부", "상태"]
+        match_headers = ["자재", "BOM수량", "TOP수량", "BOT수량", "TOP+BOT수량", "BOM여부", "TOP+BOT여부", "상태"]
         un_headers = ["자재", "BOM수량", "TOP수량", "BOT수량", "TOP+BOT수량", "상태"]
-        un_top_headers = ["자재", "BOM수량", "TOP수량", "BOM여부", "TOP여부", "상태"]
-        un_bot_headers = ["자재", "BOM수량", "BOT수량", "BOM여부", "BOT여부", "상태"]
-        unmatched_rows = [r[:5] + [r[8]] for r in match_rows if r[8] != "일치"]
+        unmatched_rows = [r[:5] + [r[7]] for r in match_rows if r[7] != "일치"]
+        # 에러 데이터: 불일치 건별로 관련 좌표명 + 불일치 유형(좌표/자재/수량·좌표개수)
+        error_data_rows = _build_error_rows_material(
+            match_rows, bom, top_bot, status_idx=7,
+            error_type_quantity="수량_불일치",
+            error_type_material="자재_미매칭",
+        )
+        error_headers = ["불일치_유형", "불일치_좌표", "자재", "BOM수량", "TOP+BOT수량", "상태", "비고"]
+        for row in error_data_rows:
+            row.append("")  # 비고
     else:
-        # 좌표+자재 기준 (기존): (coord, material) 키별 매칭
-        all_keys = set(bom.key_to_qty) | set(top.key_to_qty) | set(bot.key_to_qty)
+        # 좌표+자재 기준: (coord, material) 키별로 BOM vs (TOP+BOT 합산) 매칭
+        all_keys = set(bom.key_to_qty) | set(top_bot.key_to_qty)
         match_rows = []
-        unmatched_top_rows = []
-        unmatched_bot_rows = []
         ok_count = 0
-        unmatched_top_count = 0
-        unmatched_bot_count = 0
         for coord, mat in sorted(all_keys):
             in_b = (coord, mat) in bom.key_to_qty
-            in_t = (coord, mat) in top.key_to_qty
-            in_bo = (coord, mat) in bot.key_to_qty
+            in_tb = (coord, mat) in top_bot.key_to_qty
             q_b = bom.key_to_qty.get((coord, mat), 0.0)
             q_t = top.key_to_qty.get((coord, mat), 0.0)
             q_bo = bot.key_to_qty.get((coord, mat), 0.0)
-            q_tb = q_t + q_bo
-            status = compute_status(in_b, (in_t or in_bo), q_b, q_tb)
-            status_top = compute_status(in_b, in_t, q_b, q_t)
-            status_bot = compute_status(in_b, in_bo, q_b, q_bo)
+            q_tb = top_bot.key_to_qty.get((coord, mat), 0.0)
+            status = compute_status(in_b, in_tb, q_b, q_tb)
             key_str = f"{coord}|{mat}"
             row = [
                 key_str, coord, mat, q_b, q_t, q_bo, q_tb,
-                "Y" if in_b else "", "Y" if in_t else "", "Y" if in_bo else "",
+                "Y" if in_b else "", "Y" if in_tb else "",
                 status,
             ]
             match_rows.append(row)
             if status == "일치":
                 ok_count += 1
-            if status_top != "일치" and (in_b or in_t):
-                unmatched_top_count += 1
-                unmatched_top_rows.append([
-                    key_str, coord, mat, q_b, q_t,
-                    "Y" if in_b else "", "Y" if in_t else "", status_top,
-                ])
-            if status_bot != "일치" and (in_b or in_bo):
-                unmatched_bot_count += 1
-                unmatched_bot_rows.append([
-                    key_str, coord, mat, q_b, q_bo,
-                    "Y" if in_b else "", "Y" if in_bo else "", status_bot,
-                ])
         match_headers = [
             "키(좌표|자재)", "좌표", "자재",
             "BOM수량", "TOP수량", "BOT수량", "TOP+BOT수량",
-            "BOM여부", "TOP여부", "BOT여부", "상태",
+            "BOM여부", "TOP+BOT여부", "상태",
         ]
         un_headers = [
             "키(좌표|자재)", "좌표", "자재",
             "BOM수량", "TOP수량", "BOT수량", "TOP+BOT수량", "상태",
         ]
-        un_top_headers = [
-            "키(좌표|자재)", "좌표", "자재",
-            "BOM수량", "TOP수량", "BOM여부", "TOP여부", "상태",
-        ]
-        un_bot_headers = [
-            "키(좌표|자재)", "좌표", "자재",
-            "BOM수량", "BOT수량", "BOM여부", "BOT여부", "상태",
-        ]
-        unmatched_rows = [r[:7] + [r[10]] for r in match_rows if r[10] != "일치"]
+        unmatched_rows = [r[:7] + [r[9]] for r in match_rows if r[9] != "일치"]
+        # 에러 데이터: 불일치인 (좌표, 자재)별로 좌표명 + 불일치 유형
+        error_data_rows = _build_error_rows_coord(match_rows, bom, top_bot, status_idx=9)
+        error_headers = ["불일치_유형", "불일치_좌표", "자재", "BOM수량", "TOP+BOT수량", "상태", "비고"]
+        for row in error_data_rows:
+            row.append("")  # 비고
+
+    unmatched_count = len(unmatched_rows)
+
+    # 수량열값 ≠ 좌표개수 인 행을 에러_데이터에 추가 (불일치_유형: 수량_좌표개수_불일치)
+    qty_verify_rows: List[Tuple[str, str, int, float, int]] = []
+    for sd in (bom, top, bot):
+        for row_num, qty_col, coord_count in sd.qty_mismatch_rows:
+            qty_verify_rows.append((sd.label, sd.sheet_name, row_num, qty_col, coord_count))
+    for (label, sheet_name, row_num, qty_col, coord_count) in qty_verify_rows:
+        error_data_rows.append([
+            "수량_좌표개수_불일치", "-", "-", qty_col, coord_count,
+            "수량열≠좌표개수", f"시트={label} 시트명={sheet_name} 행={row_num}",
+        ])
 
     ws_match = ensure_fresh_sheet(wb, "매칭결과")
     write_table(ws_match, headers=match_headers, rows=match_rows)
@@ -452,16 +525,9 @@ def run_match(config: dict) -> str:
     ws_un = ensure_fresh_sheet(wb, "불일치")
     write_table(ws_un, headers=un_headers, rows=unmatched_rows)
 
-    ws_un_top = ensure_fresh_sheet(wb, "불일치_TOP")
-    write_table(ws_un_top, headers=un_top_headers, rows=unmatched_top_rows)
+    ws_error = ensure_fresh_sheet(wb, "에러_데이터")
+    write_table(ws_error, headers=error_headers, rows=error_data_rows)
 
-    ws_un_bot = ensure_fresh_sheet(wb, "불일치_BOT")
-    write_table(ws_un_bot, headers=un_bot_headers, rows=unmatched_bot_rows)
-
-    qty_verify_rows: List[Tuple[str, str, int, float, int]] = []
-    for sd in (bom, top, bot):
-        for row_num, qty_col, coord_count in sd.qty_mismatch_rows:
-            qty_verify_rows.append((sd.label, sd.sheet_name, row_num, qty_col, coord_count))
     if qty_verify_rows:
         ws_qty = ensure_fresh_sheet(wb, "수량검증")
         write_table(
@@ -497,15 +563,14 @@ def run_match(config: dict) -> str:
     write_table(
         ws_summary,
         headers=[
-            "구분", "매칭됨(일치)", "불일치(TOP)", "불일치(BOT)",
+            "구분", "매칭됨(일치)", "불일치(TOP+BOT 통합)",
             "중복좌표_BOM", "중복좌표_TOP", "중복좌표_BOT",
         ],
         rows=[
             [
-                "BOM 기준",
+                "BOM vs TOP+BOT",
                 ok_count,
-                unmatched_top_count,
-                unmatched_bot_count,
+                unmatched_count,
                 dup_count_bom,
                 dup_count_top,
                 dup_count_bot,
