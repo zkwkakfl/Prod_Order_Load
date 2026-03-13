@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bom-top-bot-match"
-version = "1.2.0"
+version = "1.3.0"
 description = "BOM/TOP/BOT 엑셀 시트 매칭 — 자재별 BOM 수량 vs TOP+BOT 총수량 비교 및 불일치·중복 기록"
 readme = "README.md"
 license = { text = "MIT" }
