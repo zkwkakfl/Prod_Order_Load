@@ -11,7 +11,12 @@ from threading import Thread
 import queue
 import sys
 
-from config import DEFAULT_OUTPUT_DIR, DEFAULT_OUTPUT_FILENAME
+from config import (
+    DEFAULT_OUTPUT_DIR,
+    DEFAULT_OUTPUT_FILENAME,
+    SOURCE_PATHS_FILE,
+    DEFAULT_SOURCE_FOLDER_PATHS,
+)
 from consolidation import process_folders
 
 
@@ -70,6 +75,13 @@ class App:
         self.status_var = tk.StringVar(value="상태: 대기 중")
         ttk.Label(run_row, textvariable=self.status_var).pack(side=tk.LEFT)
 
+        # 소스 경로 관리 버튼
+        ttk.Button(
+            frm,
+            text="소스 경로 관리...",
+            command=self._edit_source_paths,
+        ).grid(row=5, column=1, sticky=tk.W, padx=(12, 0))
+
         # 진행 표시 (실행 중일 때만 애니메이션)
         self.progress = ttk.Progressbar(frm, mode="indeterminate", length=300)
         self.progress.grid(row=6, column=0, sticky=tk.EW, pady=(0, 8))
@@ -113,6 +125,57 @@ class App:
         self.output_dir.set(str(DEFAULT_OUTPUT_DIR))
         self.output_filename.set(DEFAULT_OUTPUT_FILENAME)
         self._log("기본 경로/파일명으로 복원했습니다.")
+
+    def _edit_source_paths(self):
+        """소스 데이터 경로 목록을 추가/수정/삭제하는 간단한 다이얼로그."""
+        win = tk.Toplevel(self.root)
+        win.title("소스 데이터 경로 관리")
+        win.geometry("640x360")
+        win.transient(self.root)
+
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frm, text="소스 폴더 경로 (한 줄에 하나씩):").pack(anchor=tk.W)
+        txt = scrolledtext.ScrolledText(frm, height=12, width=80, wrap=tk.NONE)
+        txt.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
+
+        # 현재 설정 로드
+        paths = []
+        try:
+            if SOURCE_PATHS_FILE.exists():
+                import json
+
+                with SOURCE_PATHS_FILE.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    paths = data.get("folders") or data.get("paths") or []
+            else:
+                paths = DEFAULT_SOURCE_FOLDER_PATHS
+        except Exception as e:
+            self._log(f"[경고] 소스 경로 설정 로드 실패: {e}")
+            paths = DEFAULT_SOURCE_FOLDER_PATHS
+
+        if paths:
+            txt.insert(tk.END, "\n".join(str(p) for p in paths))
+
+        def save_paths():
+            import json
+
+            raw = txt.get("1.0", tk.END)
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            data = {"folders": lines}
+            try:
+                with SOURCE_PATHS_FILE.open("w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                self._log("소스 경로 설정을 저장했습니다.")
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("저장 오류", f"소스 경로 설정 저장 중 오류가 발생했습니다.\n{e}")
+
+        btn_row = ttk.Frame(frm)
+        btn_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(btn_row, text="저장", command=save_paths).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btn_row, text="취소", command=win.destroy).pack(side=tk.RIGHT)
 
     def _run(self):
         if self.running:
