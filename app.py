@@ -18,6 +18,7 @@ from config import (
     DEFAULT_SOURCE_FOLDER_PATHS,
 )
 from consolidation import process_folders
+from version_info import get_version
 
 
 def _default_output_path() -> Path:
@@ -27,7 +28,8 @@ def _default_output_path() -> Path:
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("공정발주 데이터 통합")
+        self._app_version = get_version()
+        self.root.title(f"공정발주 데이터 통합 v{self._app_version}")
         self.root.minsize(480, 420)
         self.root.geometry("560x500")
 
@@ -192,7 +194,7 @@ class App:
         self.running = True
         self.btn_run.configure(state=tk.DISABLED)
         self.status_var.set("상태: 통합 실행 중...")
-        self.root.title("공정발주 데이터 통합 (실행 중)")
+        self.root.title(f"공정발주 데이터 통합 v{self._app_version} (실행 중)")
         self.progress.start(50)
         self._log("통합을 시작합니다...")
         self._log(f"출력: {output_path}")
@@ -213,7 +215,7 @@ class App:
                     self.progress.stop()
                     self.status_var.set("상태: 완료")
                     self.btn_run.configure(state=tk.NORMAL)
-                    self.root.title("공정발주 데이터 통합")
+                    self.root.title(f"공정발주 데이터 통합 v{self._app_version}")
 
                 self.root.after(0, _done)
 
