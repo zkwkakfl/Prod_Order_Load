@@ -7,13 +7,15 @@
 
 from pathlib import Path
 import re
+from datetime import datetime
 from typing import Callable, Optional
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 from config import (
-    SOURCE_FOLDER_PATHS,
+    DEFAULT_SOURCE_FOLDER_PATHS,
+    SOURCE_PATHS_FILE,
     DEST_SHEET_NAME,
     SOURCE_SHEET_NAME_CONTAINS,
     IGNORE_SHEET_NAME_CONTAINS,
@@ -22,6 +24,8 @@ from config import (
     SOURCE_FIRST_COL,
     STANDARD_HEADERS,
 )
+
+import json
 
 
 # --- 헤더 별칭: 소스 시트에 적힌 이름 → 기준 열 번호(1-based) ---
@@ -68,8 +72,24 @@ def _get_column_indices() -> tuple[int, int, int]:
         return 0, 0, 0
 
 
+def _clean_date_text(raw: str) -> str:
+    """날짜 문자열에서 불필요한 부분 제거 및 오타 보정."""
+    if not raw:
+        return ""
+    text = raw
+    # 1) 괄호와 괄호 안 텍스트 제거
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = text.strip()
+    # 2) 2026-26-03-01 같은 패턴 보정: '연도-26-월-일' → '연도-월-일'
+    m = re.match(r"^(\d{4})-26-(\d{1,2})-(\d{1,2})$", text)
+    if m:
+        year, month, day = m.groups()
+        text = f"{year}-{int(month)}-{int(day)}"
+    return text
+
+
 def _parse_date_from_sheet_and_book(sheet_name: str, book_name: str) -> str:
-    """시트명·파일명에서 날짜 문자열 추출 (예: 2025-3-15)."""
+    """시트명·파일명에서 날짜 문자열 추출 (예: 2025-3-15) 후 클린업."""
     # 연도: 파일명에서 (예: 공정발주25복사본.xlsx → 2025)
     year_str = book_name.replace(".xlsx", "").replace(".xls", "")
     for prefix in ("공정발주", "복사본"):
@@ -80,7 +100,27 @@ def _parse_date_from_sheet_and_book(sheet_name: str, book_name: str) -> str:
     for s in ("(조립)", "조립"):
         add = add.replace(s, "").strip()
     add = add.replace("월 ", "-").replace("일", "").strip()
-    return f"{year_str}-{add}" if add else year_str
+    raw = f"{year_str}-{add}" if add else year_str
+    return _clean_date_text(raw)
+
+
+def _parse_date_for_compare(text: str) -> datetime:
+    """정렬/비교용 날짜 파싱. 실패 시 아주 과거 날짜로 처리."""
+    cleaned = _clean_date_text(text)
+    if not cleaned:
+        return datetime.min
+    # 일반적인 'YYYY-M-D' 또는 'YYYY-MM-DD' 처리
+    try:
+        parts = [int(p) for p in cleaned.split("-") if p]
+        if len(parts) >= 3:
+            year = parts[0]
+            # 2026-26-03-01 타입은 이미 _clean_date_text에서 보정됨
+            month = parts[1]
+            day = parts[2]
+            return datetime(year, month, day)
+    except Exception:
+        pass
+    return datetime.min
 
 
 def process_folders(
@@ -94,7 +134,18 @@ def process_folders(
     log(msg)로 진행/오류 메시지를 출력한다.
     반환: 성공 여부.
     """
-    source_paths = source_paths or SOURCE_FOLDER_PATHS
+    # 설정 파일에 정의된 소스 경로가 있으면 우선 사용
+    if source_paths is None:
+        loaded_paths: list[str] = []
+        try:
+            if SOURCE_PATHS_FILE.exists():
+                with SOURCE_PATHS_FILE.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    entries = data.get("folders") or data.get("paths") or []
+                    loaded_paths = [str(p) for p in entries]
+        except Exception as e:
+            log(f"[경고] 소스 경로 설정 파일 로드 실패, 기본 경로 사용: {e}")
+        source_paths = loaded_paths or DEFAULT_SOURCE_FOLDER_PATHS
     header_map = _build_header_map()
     folder_col, bom_col, issue_col = _get_column_indices()
     num_std_cols = len(STANDARD_HEADERS)
@@ -215,6 +266,40 @@ def process_folders(
         added = rows_after_folder - rows_before_folder
         log(f"[폴더 종료] {folder_path} - 파일 {processed_files}개, 추가된 행 {added}개")
 
+    # 1차 후처리: 작업지시번호 기준 최신 날짜만 남기기
+    try:
+        try:
+            job_col = STANDARD_HEADERS.index("작업지시번호") + 1
+        except ValueError:
+            job_col = 0
+        try:
+            date_col = STANDARD_HEADERS.index("날짜") + 1
+        except ValueError:
+            date_col = 1
+
+        latest_by_job: dict[str, tuple[datetime, list]] = {}
+
+        for row in rows:
+            # 작업지시번호가 없거나 열 인덱스를 찾지 못한 경우, 최종 결과에서 제외
+            if job_col <= 0 or job_col >= len(row):
+                continue
+            job = row[job_col]
+            if not job:
+                continue
+            date_text = row[date_col] if date_col < len(row) else ""
+            dt = _parse_date_for_compare(str(date_text) if date_text is not None else "")
+            key = str(job)
+            if key not in latest_by_job:
+                latest_by_job[key] = (dt, row)
+            else:
+                if dt >= latest_by_job[key][0]:
+                    latest_by_job[key] = (dt, row)
+
+        dedup_rows: list[list] = [pair[1] for pair in latest_by_job.values()]
+        rows = dedup_rows
+    except Exception as e:
+        log(f"[경고] 작업지시번호 중복 제거 중 오류 발생, 원본 전체 사용: {e}")
+
     # Excel 최대 행 수: 1,048,576 (헤더 1행 + 데이터 1,048,575행)
     EXCEL_MAX_ROWS = 1_048_576
     EXCEL_MAX_DATA_ROWS = EXCEL_MAX_ROWS - 1
@@ -242,6 +327,42 @@ def process_folders(
         for col in range(1, num_std_cols + 1):
             if col < len(row_data) and row_data[col] is not None:
                 ws_out.cell(row=out_row, column=col, value=row_data[col])
+
+    # 날짜/고객사납품 컬럼을 날짜 타입으로 정규화
+    try:
+        try:
+            date_col_idx = STANDARD_HEADERS.index("날짜") + 1
+        except ValueError:
+            date_col_idx = 1
+        try:
+            cust_ship_idx = STANDARD_HEADERS.index("고객사\n납품") + 1
+        except ValueError:
+            # 줄바꿈이 제거된 경우 대비
+            try:
+                cust_ship_idx = STANDARD_HEADERS.index("고객사납품") + 1
+            except ValueError:
+                cust_ship_idx = 0
+
+        for r in range(2, num_rows_to_write + 2):
+            # 날짜 컬럼
+            if date_col_idx:
+                cell = ws_out.cell(row=r, column=date_col_idx)
+                if cell.value:
+                    dt = _parse_date_for_compare(str(cell.value))
+                    if dt != datetime.min:
+                        cell.value = dt
+                        cell.number_format = "yyyy-mm-dd"
+            # 고객사납품 컬럼
+            if cust_ship_idx:
+                cell2 = ws_out.cell(row=r, column=cust_ship_idx)
+                if cell2.value and not isinstance(cell2.value, datetime):
+                    # 텍스트일 가능성이 있을 때만 파싱 시도
+                    dt2 = _parse_date_for_compare(str(cell2.value))
+                    if dt2 != datetime.min:
+                        cell2.value = dt2
+                        cell2.number_format = "yyyy-mm-dd"
+    except Exception as e:
+        log(f"[경고] 날짜 컬럼 타입 정규화 중 오류: {e}")
 
     # 수식 컬럼 (행 번호 기반)
     # 폴더명 = 품명 & "(" & 품번 & ")"
@@ -275,6 +396,60 @@ def process_folders(
                 column=issue_col,
                 value=f'=IF(OR(ISBLANK({get_column_letter(사업명_col)}{r}),ISBLANK({get_column_letter(품명_col)}{r})),"",{get_column_letter(사업명_col)}{r}&"-"&{get_column_letter(품명_col)}{r}&"("&{get_column_letter(품번_col)}{r}&")")',
             )
+
+    # 별도 시트: 파일 생성용 데이터 (날짜, 작업지시번호, 고객사, 폴더명, BOM파일명, 발행리스트)
+    try:
+        ws_files = wb_out.create_sheet("파일생성용")
+        headers_files = ["날짜", "작업지시번호", "고객사", "폴더명", "BOM파일명", "발행리스트"]
+        for c, h in enumerate(headers_files, start=1):
+            ws_files.cell(row=1, column=c, value=h)
+
+        # 공정발주내역 시트의 각 행을 기반으로 값 계산
+        for i in range(num_rows_to_write):
+            src_row = i + 2
+            out_row = i + 2
+            date_val = ws_out.cell(row=src_row, column=date_col).value if 'date_col' in locals() else None
+            job_val = ws_out.cell(row=src_row, column=작업지시번호_col).value
+            cust_val = ws_out.cell(row=src_row, column=고객사_col).value
+            name_val = ws_out.cell(row=src_row, column=품명_col).value
+            code_val = ws_out.cell(row=src_row, column=품번_col).value
+            proj_val = ws_out.cell(row=src_row, column=사업명_col).value
+
+            ws_files.cell(row=out_row, column=1, value=date_val)
+            ws_files.cell(row=out_row, column=2, value=job_val)
+            ws_files.cell(row=out_row, column=3, value=cust_val)
+
+            # 폴더명, BOM파일명, 발행리스트는 파이썬에서 완성된 문자열로 작성
+            if name_val and code_val:
+                folder_val = f"{name_val}({code_val})"
+            else:
+                folder_val = None
+            if job_val and cust_val and name_val and code_val:
+                bom_val = f"{job_val} {cust_val}_{name_val}({code_val})"
+            else:
+                bom_val = None
+            if proj_val and name_val and code_val:
+                issue_val = f"{proj_val}-{name_val}({code_val})"
+            else:
+                issue_val = None
+
+            ws_files.cell(row=out_row, column=4, value=folder_val)
+            ws_files.cell(row=out_row, column=5, value=bom_val)
+            ws_files.cell(row=out_row, column=6, value=issue_val)
+
+        # 공정발주내역 시트에서 폴더명/BOM파일명/발행리스트 컬럼 삭제
+        # (열 인덱스가 뒤에서 앞으로 당겨지지 않도록 역순으로 삭제)
+        cols_to_delete = []
+        if folder_col:
+            cols_to_delete.append(folder_col)
+        if bom_col:
+            cols_to_delete.append(bom_col)
+        if issue_col:
+            cols_to_delete.append(issue_col)
+        for col_idx in sorted(cols_to_delete, reverse=True):
+            ws_out.delete_cols(col_idx, 1)
+    except Exception as e:
+        log(f"[경고] 파일생성용 시트 생성 중 오류: {e}")
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,13 +7,16 @@ from pathlib import Path
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_FILENAME = "공정발주내역.xlsx"
 
-# 소스 데이터를 읽어올 폴더 경로 목록 (네트워크 경로)
-SOURCE_FOLDER_PATHS = [
+# 기본 소스 데이터를 읽어올 폴더 경로 목록 (네트워크 경로)
+DEFAULT_SOURCE_FOLDER_PATHS = [
     r"\\192.168.0.205\생산관리\2025\1.김한식BJ\3.공정발주",
     r"\\192.168.0.205\생산관리\2025\2.김준성SW\3.공정발주",
     r"\\192.168.0.205\생산관리\2026\1.김한식BJ\2.공정발주",
     r"\\192.168.0.205\생산관리\2026\2.김준성SW\3.공정발주",
 ]
+
+# 설정 파일 이름 (소스 경로를 동적으로 관리)
+SOURCE_PATHS_FILE = DEFAULT_OUTPUT_DIR / "source_paths.json"
 
 # 통합 시트 이름 (출력 워크북 내)
 DEST_SHEET_NAME = "공정발주내역"
