@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from config import (
@@ -123,6 +124,43 @@ def _parse_date_for_compare(text: str) -> datetime:
     return datetime.min
 
 
+# 작업지시번호: 문자(영문·한글) 1~2자 + "-" + 숫자4자리 + "-" + 숫자4자리 (예: AB-1234-5678, 지-0001-0002)
+_WORK_ORDER_NO_PATTERN = re.compile(r"^[A-Za-z가-힣]{1,2}-\d{4}-\d{4}$")
+
+
+def _is_valid_work_order_no(val) -> bool:
+    if val is None:
+        return False
+    s = str(val).strip()
+    return bool(_WORK_ORDER_NO_PATTERN.fullmatch(s))
+
+
+def _apply_autofilter_and_style(ws, log: Callable[[str], None], sheet_label: str) -> None:
+    """옵션 A: 자동필터 + 헤더 스타일 + 틀 고정 (진짜 테이블 객체 아님)."""
+    try:
+        mr = max(ws.max_row or 1, 1)
+        mc = max(ws.max_column or 1, 1)
+        ref = f"A1:{get_column_letter(mc)}{mr}"
+        ws.auto_filter.ref = ref
+        ws.freeze_panes = "A2"
+        fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        for c in range(1, mc + 1):
+            cell = ws.cell(row=1, column=c)
+            cell.font = Font(bold=True)
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        sample_last = min(mr, 500)
+        for c in range(1, mc + 1):
+            mlen = 10
+            for r in range(1, sample_last + 1):
+                v = ws.cell(row=r, column=c).value
+                if v is not None:
+                    mlen = max(mlen, min(len(str(v)), 55))
+            ws.column_dimensions[get_column_letter(c)].width = min(mlen * 1.05 + 2, 45)
+    except Exception as e:
+        log(f"[경고] 시트 스타일 적용 실패 ({sheet_label}): {e}")
+
+
 def process_folders(
     output_path: Path,
     log: Callable[[str], None],
@@ -149,6 +187,10 @@ def process_folders(
     header_map = _build_header_map()
     folder_col, bom_col, issue_col = _get_column_indices()
     num_std_cols = len(STANDARD_HEADERS)
+    try:
+        job_col_idx = STANDARD_HEADERS.index("작업지시번호") + 1
+    except ValueError:
+        job_col_idx = 0
 
     # 통합 데이터: 리스트 of 리스트 (각 행이 한 리스트)
     rows: list[list] = []
@@ -221,6 +263,13 @@ def process_folders(
                             continue
                         val = data_row[j]
                         row_data[dest_col] = val
+                    job_val = (
+                        row_data[job_col_idx]
+                        if job_col_idx and job_col_idx < len(row_data)
+                        else None
+                    )
+                    if not _is_valid_work_order_no(job_val):
+                        continue
                     rows.append(row_data)
         finally:
             try:
@@ -408,7 +457,7 @@ def process_folders(
         for i in range(num_rows_to_write):
             src_row = i + 2
             out_row = i + 2
-            date_val = ws_out.cell(row=src_row, column=date_col).value if 'date_col' in locals() else None
+            date_val = ws_out.cell(row=src_row, column=date_col_idx).value
             job_val = ws_out.cell(row=src_row, column=작업지시번호_col).value
             cust_val = ws_out.cell(row=src_row, column=고객사_col).value
             name_val = ws_out.cell(row=src_row, column=품명_col).value
@@ -450,6 +499,10 @@ def process_folders(
             ws_out.delete_cols(col_idx, 1)
     except Exception as e:
         log(f"[경고] 파일생성용 시트 생성 중 오류: {e}")
+
+    _apply_autofilter_and_style(ws_out, log, DEST_SHEET_NAME)
+    if "파일생성용" in wb_out.sheetnames:
+        _apply_autofilter_and_style(wb_out["파일생성용"], log, "파일생성용")
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
