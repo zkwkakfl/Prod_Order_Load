@@ -4,6 +4,7 @@
 기본 저장 경로·파일명을 사용하며, 경로 선택/파일명 입력으로 변경할 수 있다.
 """
 
+import os
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 from pathlib import Path
@@ -37,6 +38,7 @@ class App:
         self.output_filename = tk.StringVar(value=DEFAULT_OUTPUT_FILENAME)
         self.log_queue: queue.Queue = queue.Queue()
         self.running = False
+        self._last_output_path: Path | None = None
 
         self._build_ui()
         self._poll_log()
@@ -84,6 +86,14 @@ class App:
             command=self._edit_source_paths,
         ).grid(row=5, column=1, sticky=tk.W, padx=(12, 0))
 
+        self.btn_open_result = ttk.Button(
+            frm,
+            text="결과 파일 열기",
+            command=self._open_result_file,
+            state=tk.DISABLED,
+        )
+        self.btn_open_result.grid(row=5, column=2, sticky=tk.W, padx=(12, 0))
+
         # 진행 표시 (실행 중일 때만 애니메이션)
         self.progress = ttk.Progressbar(frm, mode="indeterminate", length=300)
         self.progress.grid(row=6, column=0, sticky=tk.EW, pady=(0, 8))
@@ -127,6 +137,19 @@ class App:
         self.output_dir.set(str(DEFAULT_OUTPUT_DIR))
         self.output_filename.set(DEFAULT_OUTPUT_FILENAME)
         self._log("기본 경로/파일명으로 복원했습니다.")
+
+    def _open_result_file(self):
+        p = self._last_output_path
+        if not p or not p.is_file():
+            messagebox.showwarning(
+                "파일 없음",
+                "통합이 성공한 뒤 저장된 결과 파일이 없습니다.\n먼저 통합 실행을 완료해 주세요.",
+            )
+            return
+        try:
+            os.startfile(str(p.resolve()))
+        except OSError as e:
+            messagebox.showerror("열기 실패", f"파일을 열 수 없습니다.\n{e}")
 
     def _edit_source_paths(self):
         """소스 데이터 경로 목록을 추가/수정/삭제하는 간단한 다이얼로그."""
@@ -193,6 +216,8 @@ class App:
         output_path = Path(out_dir) / out_name
         self.running = True
         self.btn_run.configure(state=tk.DISABLED)
+        self.btn_open_result.configure(state=tk.DISABLED)
+        self._last_output_path = None
         self.status_var.set("상태: 통합 실행 중...")
         self.root.title(f"공정발주 데이터 통합 v{self._app_version} (실행 중)")
         self.progress.start(50)
@@ -200,6 +225,7 @@ class App:
         self._log(f"출력: {output_path}")
 
         def work():
+            ok = False
             try:
                 ok = process_folders(output_path, self._log)
                 self.log_queue.put("[완료]" if ok else "[실패] 저장 단계에서 오류가 났을 수 있습니다.")
@@ -210,11 +236,18 @@ class App:
             finally:
                 self.log_queue.put("---")
                 self.running = False
+                path_ok = output_path if ok else None
 
                 def _done():
                     self.progress.stop()
-                    self.status_var.set("상태: 완료")
+                    self.status_var.set("상태: 완료" if ok else "상태: 실패")
                     self.btn_run.configure(state=tk.NORMAL)
+                    if ok and path_ok and path_ok.is_file():
+                        self._last_output_path = path_ok
+                        self.btn_open_result.configure(state=tk.NORMAL)
+                    else:
+                        self._last_output_path = None
+                        self.btn_open_result.configure(state=tk.DISABLED)
                     self.root.title(f"공정발주 데이터 통합 v{self._app_version}")
 
                 self.root.after(0, _done)
