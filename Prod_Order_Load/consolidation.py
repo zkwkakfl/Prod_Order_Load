@@ -2,7 +2,7 @@
 """
 공정발주 엑셀 통합 로직.
 여러 폴더의 .xlsx에서 '작업 발주' 시트 데이터를 읽어 기준 헤더에 맞춰 통합하고,
-폴더명/BOM파일명/발행리스트 컬럼에 행 번호 기반 수식을 넣습니다.
+공정발주내역 시트의 폴더명/BOM파일명/발행리스트 컬럼에 행 번호 기반 수식을 둡니다.
 """
 
 from pathlib import Path
@@ -446,63 +446,7 @@ def process_folders(
                 value=f'=IF(OR(ISBLANK({get_column_letter(사업명_col)}{r}),ISBLANK({get_column_letter(품명_col)}{r})),"",{get_column_letter(사업명_col)}{r}&"-"&{get_column_letter(품명_col)}{r}&"("&{get_column_letter(품번_col)}{r}&")")',
             )
 
-    # 별도 시트: 파일 생성용 데이터 (날짜, 작업지시번호, 고객사, 폴더명, BOM파일명, 발행리스트)
-    try:
-        ws_files = wb_out.create_sheet("파일생성용")
-        headers_files = ["날짜", "작업지시번호", "고객사", "폴더명", "BOM파일명", "발행리스트"]
-        for c, h in enumerate(headers_files, start=1):
-            ws_files.cell(row=1, column=c, value=h)
-
-        # 공정발주내역 시트의 각 행을 기반으로 값 계산
-        for i in range(num_rows_to_write):
-            src_row = i + 2
-            out_row = i + 2
-            date_val = ws_out.cell(row=src_row, column=date_col_idx).value
-            job_val = ws_out.cell(row=src_row, column=작업지시번호_col).value
-            cust_val = ws_out.cell(row=src_row, column=고객사_col).value
-            name_val = ws_out.cell(row=src_row, column=품명_col).value
-            code_val = ws_out.cell(row=src_row, column=품번_col).value
-            proj_val = ws_out.cell(row=src_row, column=사업명_col).value
-
-            ws_files.cell(row=out_row, column=1, value=date_val)
-            ws_files.cell(row=out_row, column=2, value=job_val)
-            ws_files.cell(row=out_row, column=3, value=cust_val)
-
-            # 폴더명, BOM파일명, 발행리스트는 파이썬에서 완성된 문자열로 작성
-            if name_val and code_val:
-                folder_val = f"{name_val}({code_val})"
-            else:
-                folder_val = None
-            if job_val and cust_val and name_val and code_val:
-                bom_val = f"{job_val} {cust_val}_{name_val}({code_val})"
-            else:
-                bom_val = None
-            if proj_val and name_val and code_val:
-                issue_val = f"{proj_val}-{name_val}({code_val})"
-            else:
-                issue_val = None
-
-            ws_files.cell(row=out_row, column=4, value=folder_val)
-            ws_files.cell(row=out_row, column=5, value=bom_val)
-            ws_files.cell(row=out_row, column=6, value=issue_val)
-
-        # 공정발주내역 시트에서 폴더명/BOM파일명/발행리스트 컬럼 삭제
-        # (열 인덱스가 뒤에서 앞으로 당겨지지 않도록 역순으로 삭제)
-        cols_to_delete = []
-        if folder_col:
-            cols_to_delete.append(folder_col)
-        if bom_col:
-            cols_to_delete.append(bom_col)
-        if issue_col:
-            cols_to_delete.append(issue_col)
-        for col_idx in sorted(cols_to_delete, reverse=True):
-            ws_out.delete_cols(col_idx, 1)
-    except Exception as e:
-        log(f"[경고] 파일생성용 시트 생성 중 오류: {e}")
-
     _apply_autofilter_and_style(ws_out, log, DEST_SHEET_NAME)
-    if "파일생성용" in wb_out.sheetnames:
-        _apply_autofilter_and_style(wb_out["파일생성용"], log, "파일생성용")
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
