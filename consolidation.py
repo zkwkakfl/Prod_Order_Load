@@ -25,6 +25,7 @@ from config import (
     SOURCE_FIRST_COL,
     STANDARD_HEADERS,
 )
+from sqlite_export import save_consolidated_to_sqlite
 
 import json
 
@@ -472,6 +473,7 @@ def process_folders(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb_out.save(output_path)
         log(f"저장 완료: {output_path} (총 {len(rows)}행)")
+        save_consolidated_to_sqlite(rows, output_path.with_suffix(".sqlite"), log)
     except Exception as e:
         log(f"[오류] 저장 실패: {output_path} - {e}")
         return False

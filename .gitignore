@@ -4,3 +4,4 @@ __pycache__/
 venv/
 *.xlsx
 !*template*.xlsx
+*.sqlite
