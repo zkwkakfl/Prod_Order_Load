@@ -62,6 +62,19 @@ def _norm_header(name: str) -> str:
     return (name or "").strip()
 
 
+def _trim_cell_value(val):
+    """
+    VBA Trim과 같이 문자열 앞뒤 공백만 제거한다.
+    숫자·날짜 등 비문자열은 그대로 둔다. 공백만 있던 문자열은 None으로 취급한다.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        return s if s else None
+    return val
+
+
 def _get_column_indices() -> tuple[int, int, int]:
     """폴더명, BOM파일명, 발행리스트 열 번호(1-based)."""
     try:
@@ -230,7 +243,15 @@ def process_folders(
                         header_row = next(row_iter)
                     except StopIteration:
                         continue
-                    headers = [_norm_header(str(v) if v is not None else "") for v in header_row]
+                    headers = []
+                    for v in header_row:
+                        if v is None:
+                            headers.append(_norm_header(""))
+                        else:
+                            t = _trim_cell_value(v)
+                            headers.append(
+                                _norm_header(str(t) if t is not None else "")
+                            )
                 except Exception as e:
                     log(f"  [경고] 시트 헤더 읽기 실패: {name} @ {file_path} - {e}")
                     continue
@@ -261,8 +282,7 @@ def process_folders(
                             continue
                         if j >= len(data_row):
                             continue
-                        val = data_row[j]
-                        row_data[dest_col] = val
+                        row_data[dest_col] = _trim_cell_value(data_row[j])
                     job_val = (
                         row_data[job_col_idx]
                         if job_col_idx and job_col_idx < len(row_data)
