@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+build/
+dist/
+*.spec
 *.xlsx
 !*template*.xlsx
 *.sqlite

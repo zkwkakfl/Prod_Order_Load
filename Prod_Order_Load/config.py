@@ -1,10 +1,19 @@
 # -*- coding: utf-8 -*-
 """기본 경로 및 시트/파일 설정."""
 
+import sys
 from pathlib import Path
 
-# 스크립트 기준 기본 출력 경로 (실행 파일과 같은 폴더)
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent
+
+def _app_base_dir() -> Path:
+    """소스 실행 시 스크립트 폴더, PyInstaller 빌드 시 exe 폴더."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+# 기본 저장·설정 파일 기준 폴더
+DEFAULT_OUTPUT_DIR = _app_base_dir()
 DEFAULT_OUTPUT_FILENAME = "공정발주내역.xlsx"
 
 # 기본 소스 데이터를 읽어올 폴더 경로 목록 (네트워크 경로)
