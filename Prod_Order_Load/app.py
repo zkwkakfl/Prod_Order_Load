@@ -23,6 +23,7 @@ from folder_create import (
     load_folder_create_settings,
     save_folder_create_settings,
     create_folder_structure,
+    create_folder_structure_grouped,
 )
 from consolidation import process_folders
 from sqlite_query import (
@@ -117,14 +118,11 @@ class App:
 
         tab_run = ttk.Frame(nb, padding=8)
         tab_data = ttk.Frame(nb, padding=8)
-        tab_folder = ttk.Frame(nb, padding=8)
         nb.add(tab_run, text="통합")
         nb.add(tab_data, text="데이터")
-        nb.add(tab_folder, text="폴더")
 
         self._build_tab_run(tab_run)
         self._build_tab_data(tab_data)
-        self._build_tab_folder(tab_folder)
 
     def _add_filter_block(
         self, parent: ttk.Frame, start_row: int, into_list: list[ttk.Combobox]
@@ -225,6 +223,25 @@ class App:
             side=tk.LEFT
         )
 
+        fc = ttk.LabelFrame(tab_data, text="폴더 생성 (선택 행 기준: 기본경로/고객사_사업명/폴더명/하위폴더…)")
+        fc.grid(row=2, column=0, sticky=tk.EW, padx=(520, 0))
+        fc.columnconfigure(1, weight=1)
+
+        ttk.Label(fc, text="기본 경로:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Entry(fc, textvariable=self.folder_create_base_var, width=48).grid(
+            row=0, column=1, sticky=tk.EW, padx=4, pady=2
+        )
+        ttk.Button(fc, text="찾아보기...", command=self._browse_folder_base).grid(row=0, column=2, padx=4, pady=2)
+
+        ttk.Button(fc, text="기본경로·하위폴더 목록 편집...", command=self._edit_folder_create_settings).grid(
+            row=1, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 4)
+        )
+
+        act = ttk.Frame(fc)
+        act.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 4))
+        ttk.Button(act, text="선택 행만", command=self._run_folder_create_selected).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(act, text="현재 목록 전체", command=self._run_folder_create_all_filtered).pack(side=tk.LEFT)
+
         tree_frame = ttk.Frame(tab_data)
         tree_frame.grid(row=3, column=0, sticky=tk.NSEW, pady=(0, 4))
         tree_frame.rowconfigure(0, weight=1)
@@ -248,51 +265,12 @@ class App:
         self.detail_text = scrolledtext.ScrolledText(tab_data, height=7, width=120, wrap=tk.WORD)
         self.detail_text.grid(row=5, column=0, sticky=tk.NSEW, pady=(0, 4))
 
-    def _build_tab_folder(self, tab: ttk.Frame) -> None:
-        tab.columnconfigure(0, weight=1)
-
-        ttk.Label(
-            tab,
-            text=(
-                "「데이터」 탭 표에서 선택한 행(다중 선택 가능)의 「폴더명」으로 상위 폴더를 만들고, "
-                "아래에서 설정한 이름마다 그 안에 하위 폴더를 만듭니다. (VBA CreatedFolders 이식, 파일 복사 없음)"
-            ),
-            wraplength=1180,
-        ).grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
-
-        ttk.Label(tab, text=f"설정 파일: {FOLDER_CREATE_SETTINGS_FILE}", foreground="#444").grid(
-            row=1, column=0, sticky=tk.W, pady=(0, 8)
-        )
-
-        path_row = ttk.Frame(tab)
-        path_row.grid(row=2, column=0, sticky=tk.EW, pady=(0, 8))
-        path_row.columnconfigure(1, weight=1)
-        ttk.Label(path_row, text="기본 경로:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
-        ttk.Entry(path_row, textvariable=self.folder_create_base_var).grid(
-            row=0, column=1, sticky=tk.EW, padx=(0, 8)
-        )
-        ttk.Button(path_row, text="찾아보기...", command=self._browse_folder_base).grid(row=0, column=2)
-
-        ttk.Button(tab, text="기본경로·하위폴더 목록 편집...", command=self._edit_folder_create_settings).grid(
-            row=3, column=0, sticky=tk.W, pady=(0, 16)
-        )
-
-        act = ttk.LabelFrame(tab, text="실행")
-        act.grid(row=4, column=0, sticky=tk.W, pady=(0, 12))
-        ttk.Button(act, text="데이터 탭 표에서 선택한 행만", command=self._run_folder_create_selected).pack(
-            side=tk.LEFT, padx=(0, 8)
-        )
-        ttk.Button(
-            act,
-            text="데이터 탭 표 전체 (현재 불러온 목록)",
-            command=self._run_folder_create_all_filtered,
-        ).pack(side=tk.LEFT)
-
-        ttk.Label(
-            tab,
-            text="※ 데이터 탭에서 「목록 불러오기」로 표를 채운 뒤, Ctrl/Shift로 여러 행을 선택할 수 있습니다.",
-            foreground="#666",
-        ).grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
+    def _make_group_name(self, customer: str, business: str) -> str:
+        c = (customer or "").strip()
+        b = (business or "").strip()
+        if c and b:
+            return f"{c}_{b}"
+        return c or b or "미지정"
 
     def _browse_folder_base(self) -> None:
         path = filedialog.askdirectory(
@@ -344,21 +322,29 @@ class App:
         ttk.Button(br, text="저장", command=save_fc).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(br, text="취소", command=win.destroy).pack(side=tk.RIGHT)
 
-    def _collect_folder_names_from_rows(self, cols: list[str], rows: list[tuple]) -> list[str]:
-        if "폴더명" not in cols:
-            messagebox.showwarning(
-                "열 없음",
-                "DB에 「폴더명」 열이 없습니다.\n통합 후 데이터 탭에서 목록을 다시 불러오세요.",
-            )
-            return []
-        icol = cols.index("폴더명")
-        names: list[str] = []
+    def _collect_folder_items_from_rows(self, cols: list[str], rows: list[tuple]) -> list[tuple[str, str]]:
+        for required in ("폴더명", "고객사", "사업명"):
+            if required not in cols:
+                messagebox.showwarning(
+                    "열 없음",
+                    f"DB에 「{required}」 열이 없습니다.\n통합 후 데이터 탭에서 목록을 다시 불러오세요.",
+                )
+                return []
+
+        i_folder = cols.index("폴더명")
+        i_cust = cols.index("고객사")
+        i_biz = cols.index("사업명")
+
+        out: list[tuple[str, str]] = []
         for row in rows:
-            v = row[icol] if icol < len(row) else None
-            if v is None or str(v).strip() == "":
+            folder = row[i_folder] if i_folder < len(row) else None
+            cust = row[i_cust] if i_cust < len(row) else None
+            biz = row[i_biz] if i_biz < len(row) else None
+            if folder is None or str(folder).strip() == "":
                 continue
-            names.append(str(v).strip())
-        return names
+            group = self._make_group_name("" if cust is None else str(cust), "" if biz is None else str(biz))
+            out.append((group, str(folder).strip()))
+        return out
 
     def _run_folder_create_selected(self) -> None:
         sel = list(self.tree.selection())
@@ -369,10 +355,10 @@ class App:
             )
             return
         rows = [self._tv_by_iid[iid] for iid in sel if iid in self._tv_by_iid]
-        names = self._collect_folder_names_from_rows(self._tv_cols, rows)
-        if not names:
+        items = self._collect_folder_items_from_rows(self._tv_cols, rows)
+        if not items:
             return
-        self._folder_create_thread(names)
+        self._folder_create_thread(items)
 
     def _run_folder_create_all_filtered(self) -> None:
         iids = self.tree.get_children()
@@ -383,12 +369,12 @@ class App:
             )
             return
         rows = [self._tv_by_iid[iid] for iid in iids if iid in self._tv_by_iid]
-        names = self._collect_folder_names_from_rows(self._tv_cols, rows)
-        if not names:
+        items = self._collect_folder_items_from_rows(self._tv_cols, rows)
+        if not items:
             return
-        self._folder_create_thread(names)
+        self._folder_create_thread(items)
 
-    def _folder_create_thread(self, folder_names: list[str]) -> None:
+    def _folder_create_thread(self, items: list[tuple[str, str]]) -> None:
         base_str = (self.folder_create_base_var.get() or "").strip()
         if not base_str:
             messagebox.showwarning("경로 없음", "기본 경로를 입력하거나 찾아보기로 선택하세요.")
@@ -405,9 +391,9 @@ class App:
                 err_tail = str(e)
             ok_p, sk, errs = 0, 0, []
             if not err_tail:
-                ok_p, sk, errs = create_folder_structure(
+                ok_p, sk, errs = create_folder_structure_grouped(
                     Path(base_str),
-                    folder_names,
+                    items,
                     subs,
                     log=self._log,
                 )
@@ -416,7 +402,7 @@ class App:
                 if err_tail:
                     messagebox.showerror("설정 저장 실패", err_tail)
                     return
-                msg = f"상위 폴더 처리: {ok_p}개\n건너뜀: {sk}개\n오류: {len(errs)}건"
+                msg = f"처리: {ok_p}개\n건너뜀: {sk}개\n오류: {len(errs)}건"
                 if errs:
                     msg += "\n\n" + "\n".join(errs[:15])
                     if len(errs) > 15:
@@ -428,6 +414,23 @@ class App:
 
         self.hint_var.set("폴더 생성 중…")
         Thread(target=work, daemon=True).start()
+
+    def _collect_folder_names_from_rows(self, cols: list[str], rows: list[tuple]) -> list[str]:
+        # (레거시) 예전 방식 호환을 위해 남겨둠
+        if "폴더명" not in cols:
+            messagebox.showwarning(
+                "열 없음",
+                "DB에 「폴더명」 열이 없습니다.\n통합 후 데이터 탭에서 목록을 다시 불러오세요.",
+            )
+            return []
+        icol = cols.index("폴더명")
+        names: list[str] = []
+        for row in rows:
+            v = row[icol] if icol < len(row) else None
+            if v is None or str(v).strip() == "":
+                continue
+            names.append(str(v).strip())
+        return names
 
     def _startup_load_db(self) -> None:
         self._sync_sqlite_path_from_output()

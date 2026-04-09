@@ -123,3 +123,64 @@ def create_folder_structure(
                 log(f"[폴더] 오류 {name}: {e}")
 
     return ok_parents, skipped, errs
+
+
+def create_folder_structure_grouped(
+    base_path: Path,
+    group_and_parent_names: list[tuple[str, str]],
+    subfolder_names: list[str],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> tuple[int, int, list[str]]:
+    """
+    base/group/parent/ 를 만들고, subfolder_names 각각 base/group/parent/sub/ 생성.
+
+    - group: 예) "고객사_사업명"
+    - parent: 예) "폴더명"
+    반환: (성공한 (group,parent) 처리 수, 건너뜀 수, 오류 메시지 목록)
+    """
+    errs: list[str] = []
+    if not ensure_base_directory(base_path, log):
+        return 0, len(group_and_parent_names), [f"기본 경로를 사용할 수 없습니다: {base_path}"]
+
+    ok = 0
+    skipped = 0
+    subs_clean = [replace_illegal_chars(s) for s in subfolder_names]
+    subs_clean = [s for s in subs_clean if s]
+
+    seen: set[str] = set()
+    for raw_group, raw_parent in group_and_parent_names:
+        group = replace_illegal_chars(raw_group)
+        parent_name = replace_illegal_chars(raw_parent)
+
+        if not group:
+            group = "미지정"
+        if not parent_name:
+            skipped += 1
+            if log:
+                log(f"[폴더] 빈 폴더명 건너뜀: group={raw_group!r}, parent={raw_parent!r}")
+            continue
+
+        key = (group.casefold() + "/" + parent_name.casefold())
+        if key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+
+        parent = base_path / group / parent_name
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            for sub in subs_clean:
+                (parent / sub).mkdir(parents=True, exist_ok=True)
+            ok += 1
+            if log:
+                msg = f"[폴더] 생성: {parent}"
+                if subs_clean:
+                    msg += f" (+ 하위 {len(subs_clean)}개)"
+                log(msg)
+        except OSError as e:
+            errs.append(f"{group}/{parent_name}: {e}")
+            if log:
+                log(f"[폴더] 오류 {group}/{parent_name}: {e}")
+
+    return ok, skipped, errs
