@@ -17,13 +17,14 @@ from config import (
     DEFAULT_OUTPUT_FILENAME,
     SOURCE_PATHS_FILE,
     DEFAULT_SOURCE_FOLDER_PATHS,
-    FOLDER_CREATE_SETTINGS_FILE,
 )
 from folder_create import (
     load_folder_create_settings,
     save_folder_create_settings,
     create_folder_structure,
     create_folder_structure_grouped,
+    copy_template_and_fill_cover,
+    create_blank_workbook,
 )
 from consolidation import process_folders
 from sqlite_query import (
@@ -92,6 +93,8 @@ class App:
 
         _fc = load_folder_create_settings()
         self.folder_create_base_var = tk.StringVar(value=_fc.get("base_path") or str(DEFAULT_OUTPUT_DIR))
+        self.folder_template_var = tk.StringVar(value=_fc.get("template_xlsx_path") or "")
+        self.folder_cover_sheet_var = tk.StringVar(value=_fc.get("cover_sheet_name") or "표지")
 
         self._build_ui()
         self._startup_load_db()
@@ -116,12 +119,9 @@ class App:
         nb = ttk.Notebook(frm)
         nb.grid(row=0, column=0, sticky=tk.NSEW)
 
-        tab_run = ttk.Frame(nb, padding=8)
         tab_data = ttk.Frame(nb, padding=8)
-        nb.add(tab_run, text="통합")
         nb.add(tab_data, text="데이터")
 
-        self._build_tab_run(tab_run)
         self._build_tab_data(tab_data)
 
     def _add_filter_block(
@@ -146,77 +146,58 @@ class App:
             cb.grid(row=gr, column=gc + 1, sticky=tk.EW, padx=4, pady=2)
             into_list.append(cb)
 
-    def _build_tab_run(self, tab_run: ttk.Frame) -> None:
-        tab_run.columnconfigure(0, weight=1)
-
-        ttk.Label(tab_run, text="저장 경로:").grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
-        path_row = ttk.Frame(tab_run)
-        path_row.grid(row=1, column=0, sticky=tk.EW, pady=(0, 6))
-        path_row.columnconfigure(0, weight=1)
-        ttk.Entry(path_row, textvariable=self.output_dir).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(path_row, text="찾아보기...", command=self._browse_dir).pack(side=tk.RIGHT)
-
-        ttk.Label(tab_run, text="파일명(엑셀 저장 시 .xlsx):").grid(row=2, column=0, sticky=tk.W, pady=(0, 4))
-        ttk.Entry(tab_run, textvariable=self.output_filename).grid(row=3, column=0, sticky=tk.EW, pady=(0, 6))
-
-        ttk.Checkbutton(tab_run, text="엑셀 파일도 함께 저장", variable=self.save_excel_var).grid(
-            row=4, column=0, sticky=tk.W, pady=(0, 4)
-        )
-
-        ttk.Button(tab_run, text="기본 경로/파일명으로 복원", command=self._reset_defaults).grid(
-            row=5, column=0, sticky=tk.W, pady=(0, 8)
-        )
-
-        run_row = ttk.Frame(tab_run)
-        run_row.grid(row=6, column=0, sticky=tk.W, pady=(0, 4))
-        self.btn_run = ttk.Button(run_row, text="통합 실행", command=self._run)
-        self.btn_run.pack(side=tk.LEFT, padx=(0, 8))
-        self.status_var = tk.StringVar(value="상태: 대기 중")
-        ttk.Label(run_row, textvariable=self.status_var).pack(side=tk.LEFT)
-        ttk.Button(run_row, text="소스 경로 관리...", command=self._edit_source_paths).pack(
-            side=tk.LEFT, padx=(16, 0)
-        )
-        self.btn_open_result = ttk.Button(
-            run_row,
-            text="결과 엑셀 열기",
-            command=self._open_result_file,
-            state=tk.DISABLED,
-        )
-        self.btn_open_result.pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Button(run_row, text="SQLite 열기", command=self._open_sqlite_file).pack(side=tk.LEFT, padx=(8, 0))
-
-        ttk.Label(tab_run, textvariable=self.last_merge_var, foreground="#333").grid(
-            row=7, column=0, sticky=tk.W, pady=(0, 4)
-        )
-
-        self.progress = ttk.Progressbar(tab_run, mode="indeterminate", length=400)
-        self.progress.grid(row=8, column=0, sticky=tk.EW, pady=(0, 4))
-
-        ttk.Label(tab_run, textvariable=self.hint_var, wraplength=1180, foreground="#555").grid(
-            row=9, column=0, sticky=tk.EW, pady=(0, 6)
-        )
-
-        ttk.Label(
-            tab_run,
-            text="※ SQLite 데이터 조회·필터·폴더 생성 대상 선택은 「데이터」 탭에서 합니다.",
-            foreground="#555",
-        ).grid(row=10, column=0, sticky=tk.W, pady=(8, 0))
-
     def _build_tab_data(self, tab_data: ttk.Frame) -> None:
-        tab_data.rowconfigure(3, weight=3)
-        tab_data.rowconfigure(5, weight=1)
+        tab_data.rowconfigure(6, weight=3)
+        tab_data.rowconfigure(8, weight=1)
         tab_data.columnconfigure(0, weight=1)
 
+        # 작업(통합 실행) + 설정관리
+        job = ttk.LabelFrame(tab_data, text="작업")
+        job.grid(row=0, column=0, sticky=tk.EW, pady=(0, 8))
+        for c in (1, 3, 5):
+            job.columnconfigure(c, weight=1)
+
+        ttk.Label(job, text="저장 경로:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
+        ttk.Entry(job, textvariable=self.output_dir).grid(row=0, column=1, sticky=tk.EW, padx=4, pady=2)
+        ttk.Button(job, text="찾아보기...", command=self._browse_dir).grid(row=0, column=2, padx=4, pady=2)
+
+        ttk.Label(job, text="파일명(.xlsx):").grid(row=0, column=3, sticky=tk.W, padx=4, pady=2)
+        ttk.Entry(job, textvariable=self.output_filename).grid(row=0, column=4, sticky=tk.EW, padx=4, pady=2)
+        ttk.Checkbutton(job, text="엑셀도 저장", variable=self.save_excel_var).grid(row=0, column=5, sticky=tk.W)
+
+        btns = ttk.Frame(job)
+        btns.grid(row=1, column=0, columnspan=6, sticky=tk.W, padx=4, pady=(4, 2))
+        self.btn_run = ttk.Button(btns, text="통합 실행 (SQLite 갱신)", command=self._run)
+        self.btn_run.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btns, text="설정 관리...", command=self._open_settings_manager).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btns, text="SQLite 열기", command=self._open_sqlite_file).pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_open_result = ttk.Button(btns, text="결과 엑셀 열기", command=self._open_result_file, state=tk.DISABLED)
+        self.btn_open_result.pack(side=tk.LEFT)
+
+        self.status_var = tk.StringVar(value="상태: 대기 중")
+        ttk.Label(job, textvariable=self.status_var, foreground="#333").grid(
+            row=2, column=0, columnspan=6, sticky=tk.W, padx=4, pady=(2, 2)
+        )
+        ttk.Label(job, textvariable=self.last_merge_var, foreground="#333").grid(
+            row=3, column=0, columnspan=6, sticky=tk.W, padx=4, pady=(0, 2)
+        )
+        self.progress = ttk.Progressbar(job, mode="indeterminate", length=520)
+        self.progress.grid(row=4, column=0, columnspan=6, sticky=tk.EW, padx=4, pady=(2, 2))
+        ttk.Label(job, textvariable=self.hint_var, wraplength=1180, foreground="#555").grid(
+            row=5, column=0, columnspan=6, sticky=tk.EW, padx=4, pady=(2, 2)
+        )
+
+        # DB 경로
         db_row = ttk.Frame(tab_data)
-        db_row.grid(row=0, column=0, sticky=tk.EW, pady=(0, 8))
+        db_row.grid(row=1, column=0, sticky=tk.EW, pady=(0, 8))
         db_row.columnconfigure(1, weight=1)
         ttk.Label(db_row, text="SQLite 파일:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
         ttk.Entry(db_row, textvariable=self.sqlite_path_var).grid(row=0, column=1, sticky=tk.EW)
         ttk.Button(db_row, text="찾아보기...", command=self._browse_sqlite).grid(row=0, column=2, padx=(8, 0))
 
-        self._add_filter_block(tab_data, 1, self.cb_data)
+        self._add_filter_block(tab_data, 2, self.cb_data)
         btn_row = ttk.Frame(tab_data)
-        btn_row.grid(row=2, column=0, sticky=tk.W, pady=(0, 8))
+        btn_row.grid(row=3, column=0, sticky=tk.W, pady=(0, 8))
         ttk.Button(btn_row, text="목록 불러오기", command=self._load_tree_from_db).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="필터 초기화", command=self._clear_filters_data_tab).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_row, text="콤보 목록 새로고침", command=self._reload_combos_from_current_db).pack(
@@ -224,7 +205,7 @@ class App:
         )
 
         fc = ttk.LabelFrame(tab_data, text="폴더 생성 (선택 행 기준: 기본경로/고객사_사업명/폴더명/하위폴더…)")
-        fc.grid(row=2, column=0, sticky=tk.EW, padx=(520, 0))
+        fc.grid(row=3, column=0, sticky=tk.EW, padx=(520, 0))
         fc.columnconfigure(1, weight=1)
 
         ttk.Label(fc, text="기본 경로:").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
@@ -243,7 +224,7 @@ class App:
         ttk.Button(act, text="현재 목록 전체", command=self._run_folder_create_all_filtered).pack(side=tk.LEFT)
 
         tree_frame = ttk.Frame(tab_data)
-        tree_frame.grid(row=3, column=0, sticky=tk.NSEW, pady=(0, 4))
+        tree_frame.grid(row=6, column=0, sticky=tk.NSEW, pady=(0, 4))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
         self.tree = ttk.Treeview(
@@ -260,10 +241,130 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         ttk.Label(tab_data, text="선택 행 상세 (위 표는 DB의 모든 열을 가로 스크롤로 확인):").grid(
-            row=4, column=0, sticky=tk.W, pady=(8, 4)
+            row=7, column=0, sticky=tk.W, pady=(8, 4)
         )
         self.detail_text = scrolledtext.ScrolledText(tab_data, height=7, width=120, wrap=tk.WORD)
-        self.detail_text.grid(row=5, column=0, sticky=tk.NSEW, pady=(0, 4))
+        self.detail_text.grid(row=8, column=0, sticky=tk.NSEW, pady=(0, 4))
+
+    def _open_settings_manager(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("설정 관리")
+        win.geometry("860x640")
+        win.transient(self.root)
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        tab_src = ttk.Frame(nb, padding=10)
+        tab_folder = ttk.Frame(nb, padding=10)
+        nb.add(tab_src, text="소스 경로")
+        nb.add(tab_folder, text="폴더/템플릿")
+
+        # --- 소스 경로 ---
+        ttk.Label(tab_src, text="소스 폴더 경로 (한 줄에 하나씩):").pack(anchor=tk.W)
+        txt_src = scrolledtext.ScrolledText(tab_src, height=18, width=110, wrap=tk.NONE)
+        txt_src.pack(fill=tk.BOTH, expand=True, pady=(6, 8))
+
+        paths: list[str] = []
+        try:
+            if SOURCE_PATHS_FILE.exists():
+                import json
+
+                with SOURCE_PATHS_FILE.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    paths = data.get("folders") or data.get("paths") or []
+            else:
+                paths = list(DEFAULT_SOURCE_FOLDER_PATHS)
+        except Exception as e:
+            messagebox.showwarning("로드 경고", str(e))
+            paths = list(DEFAULT_SOURCE_FOLDER_PATHS)
+
+        if paths:
+            txt_src.insert(tk.END, "\n".join(str(p) for p in paths))
+
+        def save_src() -> None:
+            import json
+
+            raw = txt_src.get("1.0", tk.END)
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            data = {"folders": lines}
+            try:
+                SOURCE_PATHS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with SOURCE_PATHS_FILE.open("w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                self.hint_var.set("소스 경로 설정을 저장했습니다.")
+            except Exception as e:
+                messagebox.showerror("저장 오류", str(e))
+
+        btn_src = ttk.Frame(tab_src)
+        btn_src.pack(fill=tk.X)
+        ttk.Button(btn_src, text="저장", command=save_src).pack(side=tk.RIGHT, padx=(6, 0))
+
+        # --- 폴더/템플릿 ---
+        s = load_folder_create_settings()
+        frm = ttk.Frame(tab_folder)
+        frm.pack(fill=tk.BOTH, expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="기본 경로:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        base_var = tk.StringVar(value=s.get("base_path") or "")
+        ttk.Entry(frm, textvariable=base_var).grid(row=0, column=1, sticky=tk.EW, pady=4, padx=(8, 0))
+        ttk.Button(
+            frm,
+            text="찾아보기...",
+            command=lambda: self._browse_dir_into_var(base_var, title="폴더 생성 기본 경로"),
+        ).grid(row=0, column=2, padx=(8, 0), pady=4)
+
+        ttk.Label(frm, text="템플릿 엑셀(.xlsx):").grid(row=1, column=0, sticky=tk.W, pady=4)
+        tmpl_var = tk.StringVar(value=s.get("template_xlsx_path") or "")
+        ttk.Entry(frm, textvariable=tmpl_var).grid(row=1, column=1, sticky=tk.EW, pady=4, padx=(8, 0))
+        ttk.Button(frm, text="찾아보기...", command=lambda: self._browse_template_into_var(tmpl_var)).grid(
+            row=1, column=2, padx=(8, 0), pady=4
+        )
+
+        ttk.Label(frm, text="표지 시트명:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        cover_var = tk.StringVar(value=s.get("cover_sheet_name") or "표지")
+        ttk.Entry(frm, textvariable=cover_var, width=24).grid(row=2, column=1, sticky=tk.W, pady=4, padx=(8, 0))
+
+        ttk.Label(frm, text="하위 폴더 이름(한 줄에 하나):").grid(row=3, column=0, sticky=tk.NW, pady=(8, 4))
+        txt_sub = scrolledtext.ScrolledText(frm, height=14, width=60, wrap=tk.NONE)
+        txt_sub.grid(row=3, column=1, columnspan=2, sticky=tk.NSEW, pady=(8, 4), padx=(8, 0))
+        frm.rowconfigure(3, weight=1)
+        subs = s.get("subfolders") or []
+        if subs:
+            txt_sub.insert(tk.END, "\n".join(str(x) for x in subs))
+
+        def save_folder() -> None:
+            raw = txt_sub.get("1.0", tk.END)
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            bp = (base_var.get() or "").strip()
+            try:
+                save_folder_create_settings(
+                    bp,
+                    lines,
+                    template_xlsx_path=(tmpl_var.get() or "").strip(),
+                    cover_sheet_name=(cover_var.get() or "").strip() or "표지",
+                )
+                self.folder_create_base_var.set(bp or str(DEFAULT_OUTPUT_DIR))
+                self.folder_template_var.set((tmpl_var.get() or "").strip())
+                self.folder_cover_sheet_var.set((cover_var.get() or "").strip() or "표지")
+                self.hint_var.set("폴더/템플릿 설정을 저장했습니다.")
+            except OSError as e:
+                messagebox.showerror("저장 오류", str(e))
+
+        btn_folder = ttk.Frame(tab_folder)
+        btn_folder.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_folder, text="저장", command=save_folder).pack(side=tk.RIGHT, padx=(6, 0))
+
+        # 하단 닫기
+        bottom = ttk.Frame(win)
+        bottom.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(bottom, text="닫기", command=win.destroy).pack(side=tk.RIGHT)
+
+    def _browse_dir_into_var(self, var: tk.StringVar, *, title: str) -> None:
+        path = filedialog.askdirectory(title=title, initialdir=var.get() or str(Path.cwd()))
+        if path:
+            var.set(path)
 
     def _make_group_name(self, customer: str, business: str) -> str:
         c = (customer or "").strip()
@@ -280,10 +381,19 @@ class App:
         if path:
             self.folder_create_base_var.set(path)
 
+    def _browse_template_xlsx(self) -> None:
+        path = filedialog.askopenfilename(
+            title="복사할 템플릿 엑셀 선택",
+            filetypes=[("Excel", "*.xlsx"), ("모든 파일", "*.*")],
+            initialdir=str(Path(self.folder_template_var.get() or ".").parent),
+        )
+        if path:
+            self.folder_template_var.set(path)
+
     def _edit_folder_create_settings(self) -> None:
         win = tk.Toplevel(self.root)
         win.title("폴더 생성 설정")
-        win.geometry("700x420")
+        win.geometry("760x520")
         win.transient(self.root)
 
         frm = ttk.Frame(win, padding=12)
@@ -295,12 +405,26 @@ class App:
         base_var = tk.StringVar(value=s.get("base_path") or "")
         ttk.Entry(frm, textvariable=base_var, width=70).grid(row=0, column=1, sticky=tk.EW, pady=(0, 8))
 
-        ttk.Label(frm, text="하위 폴더 이름 (한 줄에 하나, 비우면 상위 폴더만 생성):").grid(
-            row=1, column=0, sticky=tk.NW, pady=(4, 4)
+        ttk.Label(frm, text="복사할 템플릿 엑셀(.xlsx) 경로:").grid(row=1, column=0, sticky=tk.NW, pady=(0, 8))
+        tmpl_var = tk.StringVar(value=s.get("template_xlsx_path") or "")
+        tmpl_row = ttk.Frame(frm)
+        tmpl_row.grid(row=1, column=1, sticky=tk.EW, pady=(0, 8))
+        tmpl_row.columnconfigure(0, weight=1)
+        ttk.Entry(tmpl_row, textvariable=tmpl_var).grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
+        ttk.Button(tmpl_row, text="찾아보기...", command=lambda: self._browse_template_into_var(tmpl_var)).grid(
+            row=0, column=1
         )
-        txt = scrolledtext.ScrolledText(frm, height=14, width=60, wrap=tk.NONE)
-        txt.grid(row=1, column=1, sticky=tk.NSEW, pady=(4, 8))
-        frm.rowconfigure(1, weight=1)
+
+        ttk.Label(frm, text="표지 시트명(없으면 첫 시트 사용):").grid(row=2, column=0, sticky=tk.NW, pady=(0, 8))
+        cover_var = tk.StringVar(value=s.get("cover_sheet_name") or "표지")
+        ttk.Entry(frm, textvariable=cover_var, width=40).grid(row=2, column=1, sticky=tk.W, pady=(0, 8))
+
+        ttk.Label(frm, text="하위 폴더 이름 (한 줄에 하나, 비우면 상위 폴더만 생성):").grid(
+            row=3, column=0, sticky=tk.NW, pady=(4, 4)
+        )
+        txt = scrolledtext.ScrolledText(frm, height=12, width=60, wrap=tk.NONE)
+        txt.grid(row=3, column=1, sticky=tk.NSEW, pady=(4, 8))
+        frm.rowconfigure(3, weight=1)
         subs = s.get("subfolders") or []
         if subs:
             txt.insert(tk.END, "\n".join(str(x) for x in subs))
@@ -310,20 +434,50 @@ class App:
             lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
             bp = (base_var.get() or "").strip()
             try:
-                save_folder_create_settings(bp, lines)
+                save_folder_create_settings(
+                    bp,
+                    lines,
+                    template_xlsx_path=(tmpl_var.get() or "").strip(),
+                    cover_sheet_name=(cover_var.get() or "").strip() or "표지",
+                )
                 self.folder_create_base_var.set(bp or str(DEFAULT_OUTPUT_DIR))
+                self.folder_template_var.set((tmpl_var.get() or "").strip())
+                self.folder_cover_sheet_var.set((cover_var.get() or "").strip() or "표지")
                 win.destroy()
                 self.hint_var.set("폴더 생성 설정을 저장했습니다.")
             except OSError as e:
                 messagebox.showerror("저장 오류", str(e))
 
         br = ttk.Frame(frm)
-        br.grid(row=2, column=0, columnspan=2, sticky=tk.E, pady=(8, 0))
+        br.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(8, 0))
         ttk.Button(br, text="저장", command=save_fc).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Button(br, text="취소", command=win.destroy).pack(side=tk.RIGHT)
 
-    def _collect_folder_items_from_rows(self, cols: list[str], rows: list[tuple]) -> list[tuple[str, str]]:
-        for required in ("폴더명", "고객사", "사업명"):
+    def _browse_template_into_var(self, var: tk.StringVar) -> None:
+        path = filedialog.askopenfilename(
+            title="복사할 템플릿 엑셀 선택",
+            filetypes=[("Excel", "*.xlsx"), ("모든 파일", "*.*")],
+            initialdir=str(Path(var.get() or ".").parent),
+        )
+        if path:
+            var.set(path)
+
+    def _collect_folder_items_from_rows(self, cols: list[str], rows: list[tuple]) -> list[dict]:
+        # 폴더 생성 + 파일 복사/표지입력에 필요한 컬럼
+        required_cols = (
+            "폴더명",
+            "고객사",
+            "사업명",
+            "BOM파일명",
+            "작업지시번호",
+            "품명",
+            "품번",
+            "공정",
+            "고객사납품",
+            "자재입고수량",
+            "발주사양",
+        )
+        for required in required_cols:
             if required not in cols:
                 messagebox.showwarning(
                     "열 없음",
@@ -334,8 +488,16 @@ class App:
         i_folder = cols.index("폴더명")
         i_cust = cols.index("고객사")
         i_biz = cols.index("사업명")
+        i_bom = cols.index("BOM파일명")
+        i_job = cols.index("작업지시번호")
+        i_prod = cols.index("품명")
+        i_code = cols.index("품번")
+        i_proc = cols.index("공정")
+        i_ship = cols.index("고객사납품")
+        i_in = cols.index("자재입고수량")
+        i_spec = cols.index("발주사양")
 
-        out: list[tuple[str, str]] = []
+        out: list[dict] = []
         for row in rows:
             folder = row[i_folder] if i_folder < len(row) else None
             cust = row[i_cust] if i_cust < len(row) else None
@@ -343,7 +505,26 @@ class App:
             if folder is None or str(folder).strip() == "":
                 continue
             group = self._make_group_name("" if cust is None else str(cust), "" if biz is None else str(biz))
-            out.append((group, str(folder).strip()))
+            bom_name = row[i_bom] if i_bom < len(row) else None
+            p_values = [
+                "" if row[i_job] is None else str(row[i_job]),
+                "" if cust is None else str(cust),
+                "" if biz is None else str(biz),
+                "" if row[i_prod] is None else str(row[i_prod]),
+                "" if row[i_code] is None else str(row[i_code]),
+                "" if row[i_proc] is None else str(row[i_proc]),
+                "" if row[i_ship] is None else str(row[i_ship]),
+                "" if row[i_in] is None else str(row[i_in]),
+                "" if row[i_spec] is None else str(row[i_spec]),
+            ]
+            out.append(
+                {
+                    "group": group,
+                    "folder": str(folder).strip(),
+                    "bom_filename": "" if bom_name is None else str(bom_name).strip(),
+                    "p_values": [v.strip() for v in p_values],
+                }
+            )
         return out
 
     def _run_folder_create_selected(self) -> None:
@@ -374,7 +555,7 @@ class App:
             return
         self._folder_create_thread(items)
 
-    def _folder_create_thread(self, items: list[tuple[str, str]]) -> None:
+    def _folder_create_thread(self, items: list[dict]) -> None:
         base_str = (self.folder_create_base_var.get() or "").strip()
         if not base_str:
             messagebox.showwarning("경로 없음", "기본 경로를 입력하거나 찾아보기로 선택하세요.")
@@ -382,21 +563,57 @@ class App:
 
         st = load_folder_create_settings()
         subs = list(st.get("subfolders") or [])
+        template_path = Path((st.get("template_xlsx_path") or "").strip())
+        cover_sheet = (st.get("cover_sheet_name") or "표지").strip() or "표지"
 
         def work() -> None:
             err_tail = ""
             try:
-                save_folder_create_settings(base_str, subs)
+                save_folder_create_settings(
+                    base_str,
+                    subs,
+                    template_xlsx_path=str(template_path) if str(template_path).strip() else "",
+                    cover_sheet_name=cover_sheet,
+                )
             except OSError as e:
                 err_tail = str(e)
             ok_p, sk, errs = 0, 0, []
             if not err_tail:
+                # 1) 폴더 구조: base/group/폴더명/(sub...)
+                pairs = [(it["group"], it["folder"]) for it in items]
                 ok_p, sk, errs = create_folder_structure_grouped(
                     Path(base_str),
-                    items,
+                    pairs,
                     subs,
                     log=self._log,
                 )
+                # 2) 파일 생성/복사: base/group 에 생성
+                base = Path(base_str)
+                for it in items:
+                    group_dir = base / it["group"]
+                    group_dir.mkdir(parents=True, exist_ok=True)
+
+                    # A) 새 워크북 생성: {폴더명}-표.xlsx
+                    blank_name = f'{it["folder"]}-좌표.xlsx'
+                    ok1, e1 = create_blank_workbook(dest_xlsx=group_dir / blank_name, log=self._log)
+                    if (not ok1) and e1:
+                        errs.append(f'{it["group"]}/{blank_name}: {e1}')
+
+                    # B) 템플릿 복사 + 표지 입력: {BOM파일명}.xlsx
+                    bom_base = it.get("bom_filename") or ""
+                    if bom_base:
+                        dest = group_dir / f"{bom_base}.xlsx"
+                        ok2, e2 = copy_template_and_fill_cover(
+                            template_xlsx=template_path,
+                            dest_xlsx=dest,
+                            cover_sheet_name=cover_sheet,
+                            p1_to_p9_values=list(it.get("p_values") or []),
+                            log=self._log,
+                        )
+                        if (not ok2) and e2:
+                            errs.append(f'{it["group"]}/{dest.name}: {e2}')
+                    else:
+                        errs.append(f'{it["group"]}/{it["folder"]}: BOM파일명이 비어 있어 템플릿 복사를 건너뜀')
 
             def done() -> None:
                 if err_tail:
@@ -603,53 +820,8 @@ class App:
         self.detail_text.insert(tk.END, "\n".join(lines))
 
     def _edit_source_paths(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("소스 데이터 경로 관리")
-        win.geometry("640x360")
-        win.transient(self.root)
-
-        frm = ttk.Frame(win, padding=12)
-        frm.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(frm, text="소스 폴더 경로 (한 줄에 하나씩):").pack(anchor=tk.W)
-        txt = scrolledtext.ScrolledText(frm, height=12, width=80, wrap=tk.NONE)
-        txt.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
-
-        paths: list = []
-        try:
-            if SOURCE_PATHS_FILE.exists():
-                import json
-
-                with SOURCE_PATHS_FILE.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    paths = data.get("folders") or data.get("paths") or []
-            else:
-                paths = list(DEFAULT_SOURCE_FOLDER_PATHS)
-        except Exception as e:
-            messagebox.showwarning("로드 경고", str(e))
-            paths = list(DEFAULT_SOURCE_FOLDER_PATHS)
-
-        if paths:
-            txt.insert(tk.END, "\n".join(str(p) for p in paths))
-
-        def save_paths() -> None:
-            import json
-
-            raw = txt.get("1.0", tk.END)
-            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-            data = {"folders": lines}
-            try:
-                with SOURCE_PATHS_FILE.open("w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                win.destroy()
-                self.hint_var.set("소스 경로 설정을 저장했습니다.")
-            except Exception as e:
-                messagebox.showerror("저장 오류", str(e))
-
-        btn_row = ttk.Frame(frm)
-        btn_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(btn_row, text="저장", command=save_paths).pack(side=tk.RIGHT, padx=(4, 0))
-        ttk.Button(btn_row, text="취소", command=win.destroy).pack(side=tk.RIGHT)
+        # 레거시: 기존 버튼을 없애면서도 외부 호출이 있으면 설정관리로 연결
+        self._open_settings_manager()
 
     def _run(self) -> None:
         if self.running:
