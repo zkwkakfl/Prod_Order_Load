@@ -28,7 +28,7 @@ def query_consolidated(
     *,
     job_contains: str = "",
     customer_contains: str = "",
-    process_contains: str = "",
+    business_contains: str = "",
     product_contains: str = "",
     code_contains: str = "",
     spec_contains: str = "",
@@ -57,7 +57,7 @@ def query_consolidated(
 
     add_like("작업지시번호", job_contains)
     add_like("고객사", customer_contains)
-    add_like("공정", process_contains)
+    add_like("사업명", business_contains)
     add_like("품명", product_contains)
     add_like("품번", code_contains)
     add_like("발주사양", spec_contains)

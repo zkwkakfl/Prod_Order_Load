@@ -37,7 +37,7 @@ from version_info import get_version
 _FILTER_SPEC = [
     ("작업지시번호", "작업지시번호"),
     ("고객사", "고객사"),
-    ("공정", "공정"),
+    ("사업명", "사업명"),
     ("품명", "품명"),
     ("품번", "품번"),
     ("발주사양", "발주사양"),
@@ -65,7 +65,7 @@ class App:
 
         self.filter_job = tk.StringVar(value="(전체)")
         self.filter_customer = tk.StringVar(value="(전체)")
-        self.filter_process = tk.StringVar(value="(전체)")
+        self.filter_business = tk.StringVar(value="(전체)")
         self.filter_product = tk.StringVar(value="(전체)")
         self.filter_code = tk.StringVar(value="(전체)")
         self.filter_spec = tk.StringVar(value="(전체)")
@@ -75,7 +75,7 @@ class App:
         self._filter_vars = [
             self.filter_job,
             self.filter_customer,
-            self.filter_process,
+            self.filter_business,
             self.filter_product,
             self.filter_code,
             self.filter_spec,
@@ -129,17 +129,18 @@ class App:
     ) -> None:
         flt = ttk.LabelFrame(parent, text="목록 필터 (콤보 — DB 고유값, 직접 입력도 가능)")
         flt.grid(row=start_row, column=0, sticky=tk.EW, pady=(0, 6))
-        for c in (1, 3):
+        for c in (1, 3, 5, 7):
             flt.columnconfigure(c, weight=1)
 
         labels = [x[0] for x in _FILTER_SPEC]
-        grid_pos = [(0, 0), (0, 2), (1, 0), (1, 2), (2, 0), (2, 2), (3, 0), (3, 2)]
+        # 2줄(세로)로 압축: 8개 필터를 4개씩 배치
+        grid_pos = [(0, 0), (0, 2), (0, 4), (0, 6), (1, 0), (1, 2), (1, 4), (1, 6)]
         for label, var, (gr, gc) in zip(labels, self._filter_vars, grid_pos):
             ttk.Label(flt, text=label).grid(row=gr, column=gc, sticky=tk.W, padx=4, pady=2)
             cb = ttk.Combobox(
                 flt,
                 textvariable=var,
-                width=28,
+                width=24,
                 values=["(전체)"],
                 state="normal",
             )
@@ -771,7 +772,7 @@ class App:
             db_path,
             job_contains=self.filter_job.get(),
             customer_contains=self.filter_customer.get(),
-            process_contains=self.filter_process.get(),
+            business_contains=self.filter_business.get(),
             product_contains=self.filter_product.get(),
             code_contains=self.filter_code.get(),
             spec_contains=self.filter_spec.get(),
