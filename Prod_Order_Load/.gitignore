@@ -8,3 +8,5 @@ dist/
 *.xlsx
 !*template*.xlsx
 *.sqlite
+source_paths.json
+folder_create_settings.json

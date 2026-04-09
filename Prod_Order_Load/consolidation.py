@@ -179,11 +179,13 @@ def process_folders(
     output_path: Path,
     log: Callable[[str], None],
     source_paths: Optional[list[str]] = None,
+    save_excel: bool = True,
 ) -> bool:
     """
-    source_paths 내 모든 .xlsx를 재귀 탐색해 데이터를 통합하고 output_path에 저장한다.
+    source_paths 내 모든 .xlsx를 재귀 탐색해 데이터를 통합한다.
+    기본: SQLite(output_path와 동일 경로 .sqlite) 저장 후 엑셀(output_path) 저장.
+    save_excel=False 이면 SQLite만 갱신한다.
     경로 접근 실패 시 해당 경로만 로그에 남기고 계속 진행한다.
-    log(msg)로 진행/오류 메시지를 출력한다.
     반환: 성공 여부.
     """
     # 설정 파일에 정의된 소스 경로가 있으면 우선 사용
@@ -377,6 +379,14 @@ def process_folders(
         log(f"[경고] 데이터가 Excel 최대 행 수를 초과합니다. 처음 {EXCEL_MAX_DATA_ROWS}행만 저장합니다. (총 {len(rows)}행)")
         rows = rows[:EXCEL_MAX_DATA_ROWS]
 
+    db_path = output_path.with_suffix(".sqlite")
+    if not save_consolidated_to_sqlite(rows, db_path, log):
+        return False
+
+    if not save_excel:
+        log("엑셀 저장 생략: SQLite만 갱신했습니다.")
+        return True
+
     # 출력: 새 워크북, 1행 헤더, 2행부터 데이터
     try:
         wb_out = Workbook()
@@ -473,7 +483,6 @@ def process_folders(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         wb_out.save(output_path)
         log(f"저장 완료: {output_path} (총 {len(rows)}행)")
-        save_consolidated_to_sqlite(rows, output_path.with_suffix(".sqlite"), log)
     except Exception as e:
         log(f"[오류] 저장 실패: {output_path} - {e}")
         return False

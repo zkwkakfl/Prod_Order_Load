@@ -26,6 +26,8 @@ DEFAULT_SOURCE_FOLDER_PATHS = [
 
 # 설정 파일 이름 (소스 경로를 동적으로 관리)
 SOURCE_PATHS_FILE = DEFAULT_OUTPUT_DIR / "source_paths.json"
+# 폴더 생성: 기본 경로 + 하위 폴더 이름 목록 (CreatedFolders.bas 이식, 파일 복사 없음)
+FOLDER_CREATE_SETTINGS_FILE = DEFAULT_OUTPUT_DIR / "folder_create_settings.json"
 
 # 통합 시트 이름 (출력 워크북 내)
 DEST_SHEET_NAME = "공정발주내역"
