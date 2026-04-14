@@ -43,21 +43,39 @@ SOURCE_DATA_START_ROW = 4
 # 소스 데이터 시작 열 (C = 3)
 SOURCE_FIRST_COL = 3
 
-# 통합 시트 1행 기준 헤더 순서 (열 인덱스 = 순서). 수식 컬럼은 여기 포함.
-# 요구사항: 날짜, 작업지시번호, 고객사, 사업명, 품명, 품번, 공정, 자재입고수량, 고객사납품, 발주사양, 폴더명, BOM파일명, 발행리스트
+# 통합 시트 1행·SQLite 컬럼명(영문 snake_case). 순서 = 데이터 열 순서.
 STANDARD_HEADERS = [
-    "날짜",
-    "작업지시번호",
-    "고객사",
-    "사업명",
-    "품명",
-    "품번",
-    "공정",
-    "고객사납품",
-    "자재입고수량",
-    "발주사양",
-    "폴더명",      # 수식
-    "BOM파일명",   # 수식
-    "발행리스트",  # 수식
-    # 필요 시 추가
+    "created_date",
+    "work_order_no",
+    "customer_name",
+    "project_name",
+    "product_name",
+    "part_no",
+    "process_code",
+    "cust_delivery_date",
+    "material_receipt_note",
+    "order_spec",
+    "order_spec_detail",
+    "folder_label",       # 수식·계산
+    "bom_file_label",     # 수식·계산
+    "release_list_label", # 수식·계산
+]
+
+# 소스 엑셀 시트 머리글(한글 등) → 위 STANDARD_HEADERS와 같은 순서.
+# consolidation._build_header_map 에서 열 번호로 매핑한다.
+SHEET_HEADER_ALIASES_PER_COL: list[list[str]] = [
+    ["날짜"],
+    ["작업지시번호"],
+    ["고객사"],
+    ["사업명"],
+    ["품명"],
+    ["품번"],
+    ["공정"],
+    ["고객사납품", "고객사\n납품"],
+    ["자재입고수량", "자재입고\n수량", "수량"],
+    ["발주사양", "발주사양(생산기술검토)"],
+    [],
+    ["폴더명"],
+    ["BOM파일명"],
+    ["발행리스트"],
 ]

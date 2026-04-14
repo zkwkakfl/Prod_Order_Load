@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from date_norm import parse_to_datetime
 
 CONSOLIDATED_TABLE = "consolidated_data"
 
@@ -23,6 +26,19 @@ def list_columns(conn: sqlite3.Connection) -> list[str]:
     return [row[1] for row in cur.fetchall()]
 
 
+def _sqlite_date_sort_key(s) -> str:
+    """날짜 열 정렬용: 파싱해 YYYY-MM-DD 키로 통일(레거시 26-4-5 등도 순서 일치)."""
+    if s is None:
+        return ""
+    t = str(s).strip()
+    if not t:
+        return ""
+    dt = parse_to_datetime(t)
+    if dt == datetime.min:
+        return ""
+    return dt.strftime("%Y-%m-%d")
+
+
 def query_consolidated(
     db_path: Path,
     *,
@@ -35,10 +51,13 @@ def query_consolidated(
     date_from: str = "",
     date_to: str = "",
     limit: int = 50_000,
+    order_by_column: str | None = None,
+    order_desc: bool = False,
 ) -> tuple[list[str], list[tuple[Any, ...]]]:
     """
     필터는 부분 일치(LIKE, 대소문자 구분은 SQLite 기본).
     날짜는 TEXT(YYYY-MM-DD 권장) 기준 문자열 비교.
+    order_by_column: 테이블에 존재하는 열만 허용(그 외·None이면 id 내림차순).
     반환: (컬럼명 리스트, 행 튜플 리스트).
     """
     if not db_path.is_file():
@@ -55,20 +74,27 @@ def query_consolidated(
         esc = s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{esc}%")
 
-    add_like("작업지시번호", job_contains)
-    add_like("고객사", customer_contains)
-    add_like("사업명", business_contains)
-    add_like("품명", product_contains)
-    add_like("품번", code_contains)
-    add_like("발주사양", spec_contains)
+    add_like("work_order_no", job_contains)
+    add_like("customer_name", customer_contains)
+    add_like("project_name", business_contains)
+    add_like("product_name", product_contains)
+    add_like("part_no", code_contains)
+    s_spec = (spec_contains or "").strip()
+    if s_spec and s_spec != "(전체)":
+        esc = s_spec.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pat = f"%{esc}%"
+        conds.append(
+            f"({_qi('order_spec')} LIKE ? ESCAPE '\\' OR {_qi('order_spec_detail')} LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pat, pat])
 
     df = (date_from or "").strip()
     dt = (date_to or "").strip()
     if df and df != "(전체)":
-        conds.append(f'{_qi("날짜")} >= ?')
+        conds.append(f'{_qi("created_date")} >= ?')
         params.append(df)
     if dt and dt != "(전체)":
-        conds.append(f'{_qi("날짜")} <= ?')
+        conds.append(f'{_qi("created_date")} <= ?')
         params.append(dt)
 
     lim = max(1, min(int(limit), 200_000))
@@ -88,7 +114,17 @@ def query_consolidated(
             return [], []
 
         where_sql = " AND ".join(conds)
-        sql = f"SELECT * FROM {CONSOLIDATED_TABLE} WHERE {where_sql} ORDER BY id DESC LIMIT ?"
+        ob = (order_by_column or "").strip()
+        conn.create_function("date_norm_sort", 1, _sqlite_date_sort_key)
+        if ob and ob in cols:
+            direction = "DESC" if order_desc else "ASC"
+            if ob == "created_date":
+                order_sql = f"ORDER BY date_norm_sort({_qi(ob)}) {direction}, {_qi('id')} DESC"
+            else:
+                order_sql = f"ORDER BY {_qi(ob)} {direction}, {_qi('id')} DESC"
+        else:
+            order_sql = "ORDER BY id DESC"
+        sql = f"SELECT * FROM {CONSOLIDATED_TABLE} WHERE {where_sql} {order_sql} LIMIT ?"
         params.append(lim)
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -98,7 +134,7 @@ def query_consolidated(
 
 
 def get_last_exported_at(db_path: Path) -> str | None:
-    """가장 최근 통합 시각(exported_at 최댓값). 없으면 None."""
+    """가장 최근 통합 시각(update_at 최댓값). 없으면 None."""
     if not db_path.is_file():
         return None
     conn = sqlite3.connect(str(db_path))
@@ -110,7 +146,7 @@ def get_last_exported_at(db_path: Path) -> str | None:
         )
         if not cur.fetchone():
             return None
-        cur.execute(f"SELECT MAX({_qi('exported_at')}) FROM {CONSOLIDATED_TABLE}")
+        cur.execute(f"SELECT MAX({_qi('update_at')}) FROM {CONSOLIDATED_TABLE}")
         row = cur.fetchone()
         if not row or row[0] is None or str(row[0]).strip() == "":
             return None
@@ -121,7 +157,7 @@ def get_last_exported_at(db_path: Path) -> str | None:
 
 def fetch_distinct_column(
     db_path: Path,
-    column_kr: str,
+    column_name: str,
     *,
     limit: int = 400,
 ) -> list[str]:
@@ -139,9 +175,9 @@ def fetch_distinct_column(
         if not cur.fetchone():
             return []
         cols = list_columns(conn)
-        if column_kr not in cols:
+        if column_name not in cols:
             return []
-        qcol = _qi(column_kr)
+        qcol = _qi(column_name)
         cur.execute(
             f"""
             SELECT DISTINCT {qcol} FROM {CONSOLIDATED_TABLE}

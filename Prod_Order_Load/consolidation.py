@@ -23,39 +23,35 @@ from config import (
     SOURCE_HEADER_ROW,
     SOURCE_DATA_START_ROW,
     SOURCE_FIRST_COL,
+    SHEET_HEADER_ALIASES_PER_COL,
     STANDARD_HEADERS,
 )
-from sqlite_export import save_consolidated_to_sqlite
+from date_norm import clean_date_text, normalize_date_to_iso, parse_to_datetime
+from order_spec_split import split_order_spec_cell
+from sqlite_export import material_receipt_cell_int, save_consolidated_to_sqlite
 
 import json
 
 
 # --- 헤더 별칭: 소스 시트에 적힌 이름 → 기준 열 번호(1-based) ---
 def _build_header_map() -> dict[str, int]:
-    """기준 헤더 순서로 열 번호(1-based) 맵을 만들고, 별칭을 등록한다."""
-    # 공백/줄바꿈 제거 버전도 키로 쓸 수 있도록
+    """영문 표준 열명 + 시트 한글 머리글 별칭 → 열 번호(1-based)."""
     def norm(s: str) -> str:
         return re.sub(r"[\s\n\r]+", "", s) if s else ""
 
     mapping: dict[str, int] = {}
-    for idx, name in enumerate(STANDARD_HEADERS, start=1):
-        mapping[name.strip()] = idx
-        mapping[norm(name)] = idx
-        # 줄바꿈 변형
-        if "\n" in name:
-            mapping[name.replace("\n", "\r\n")] = idx
-
-    # VBA와 동일한 별칭
-    for std_name, col in list(mapping.items()):
-        if "자재입고" in std_name and "수량" in std_name:
-            mapping["자재입고\n수량"] = col
-            mapping["자재입고수량"] = col
-        if "고객사" in std_name and "납품" in std_name:
-            mapping["고객사\n납품"] = col
-            mapping["고객사납품"] = col
-        if std_name == "발주사양":
-            mapping["발주사양(생산기술검토)"] = col
-
+    if len(SHEET_HEADER_ALIASES_PER_COL) != len(STANDARD_HEADERS):
+        raise ValueError("SHEET_HEADER_ALIASES_PER_COL 길이가 STANDARD_HEADERS와 같아야 합니다.")
+    for idx, (std_name, aliases) in enumerate(
+        zip(STANDARD_HEADERS, SHEET_HEADER_ALIASES_PER_COL, strict=True), start=1
+    ):
+        for key in (std_name, *aliases):
+            if not key:
+                continue
+            mapping[key.strip()] = idx
+            mapping[norm(key)] = idx
+            if "\n" in key:
+                mapping[key.replace("\n", "\r\n")] = idx
     return mapping
 
 
@@ -77,34 +73,18 @@ def _trim_cell_value(val):
 
 
 def _get_column_indices() -> tuple[int, int, int]:
-    """폴더명, BOM파일명, 발행리스트 열 번호(1-based)."""
+    """folder_label, bom_file_label, release_list_label 열 번호(1-based)."""
     try:
-        folder_col = STANDARD_HEADERS.index("폴더명") + 1
-        bom_col = STANDARD_HEADERS.index("BOM파일명") + 1
-        issue_col = STANDARD_HEADERS.index("발행리스트") + 1
+        folder_col = STANDARD_HEADERS.index("folder_label") + 1
+        bom_col = STANDARD_HEADERS.index("bom_file_label") + 1
+        issue_col = STANDARD_HEADERS.index("release_list_label") + 1
         return folder_col, bom_col, issue_col
     except ValueError:
         return 0, 0, 0
 
 
-def _clean_date_text(raw: str) -> str:
-    """날짜 문자열에서 불필요한 부분 제거 및 오타 보정."""
-    if not raw:
-        return ""
-    text = raw
-    # 1) 괄호와 괄호 안 텍스트 제거
-    text = re.sub(r"\([^)]*\)", "", text)
-    text = text.strip()
-    # 2) 2026-26-03-01 같은 패턴 보정: '연도-26-월-일' → '연도-월-일'
-    m = re.match(r"^(\d{4})-26-(\d{1,2})-(\d{1,2})$", text)
-    if m:
-        year, month, day = m.groups()
-        text = f"{year}-{int(month)}-{int(day)}"
-    return text
-
-
 def _parse_date_from_sheet_and_book(sheet_name: str, book_name: str) -> str:
-    """시트명·파일명에서 날짜 문자열 추출 (예: 2025-3-15) 후 클린업."""
+    """시트명·파일명에서 날짜 문자열 추출 후 YYYY-MM-DD로 통일."""
     # 연도: 파일명에서 (예: 공정발주25복사본.xlsx → 2025)
     year_str = book_name.replace(".xlsx", "").replace(".xls", "")
     for prefix in ("공정발주", "복사본"):
@@ -116,26 +96,9 @@ def _parse_date_from_sheet_and_book(sheet_name: str, book_name: str) -> str:
         add = add.replace(s, "").strip()
     add = add.replace("월 ", "-").replace("일", "").strip()
     raw = f"{year_str}-{add}" if add else year_str
-    return _clean_date_text(raw)
-
-
-def _parse_date_for_compare(text: str) -> datetime:
-    """정렬/비교용 날짜 파싱. 실패 시 아주 과거 날짜로 처리."""
-    cleaned = _clean_date_text(text)
-    if not cleaned:
-        return datetime.min
-    # 일반적인 'YYYY-M-D' 또는 'YYYY-MM-DD' 처리
-    try:
-        parts = [int(p) for p in cleaned.split("-") if p]
-        if len(parts) >= 3:
-            year = parts[0]
-            # 2026-26-03-01 타입은 이미 _clean_date_text에서 보정됨
-            month = parts[1]
-            day = parts[2]
-            return datetime(year, month, day)
-    except Exception:
-        pass
-    return datetime.min
+    cleaned = clean_date_text(raw)
+    iso = normalize_date_to_iso(cleaned)
+    return iso if iso else cleaned
 
 
 # 작업지시번호: 문자(영문·한글) 1~2자 + "-" + 숫자4자리 + "-" + 숫자4자리 (예: AB-1234-5678, 지-0001-0002)
@@ -204,7 +167,7 @@ def process_folders(
     folder_col, bom_col, issue_col = _get_column_indices()
     num_std_cols = len(STANDARD_HEADERS)
     try:
-        job_col_idx = STANDARD_HEADERS.index("작업지시번호") + 1
+        job_col_idx = STANDARD_HEADERS.index("work_order_no") + 1
     except ValueError:
         job_col_idx = 0
 
@@ -286,6 +249,17 @@ def process_folders(
                         if j >= len(data_row):
                             continue
                         row_data[dest_col] = _trim_cell_value(data_row[j])
+                    try:
+                        osi = STANDARD_HEADERS.index("order_spec") + 1
+                        odi = STANDARD_HEADERS.index("order_spec_detail") + 1
+                    except ValueError:
+                        pass
+                    else:
+                        if osi < len(row_data):
+                            kind, detail = split_order_spec_cell(row_data[osi])
+                            row_data[osi] = kind
+                            if odi < len(row_data):
+                                row_data[odi] = detail
                     job_val = (
                         row_data[job_col_idx]
                         if job_col_idx and job_col_idx < len(row_data)
@@ -293,6 +267,14 @@ def process_folders(
                     )
                     if not _is_valid_work_order_no(job_val):
                         continue
+                    try:
+                        dci = STANDARD_HEADERS.index("created_date") + 1
+                    except ValueError:
+                        dci = 1
+                    if dci < len(row_data) and row_data[dci] is not None:
+                        iso = normalize_date_to_iso(row_data[dci])
+                        if iso:
+                            row_data[dci] = iso
                     rows.append(row_data)
         finally:
             try:
@@ -341,11 +323,11 @@ def process_folders(
     # 1차 후처리: 작업지시번호 기준 최신 날짜만 남기기
     try:
         try:
-            job_col = STANDARD_HEADERS.index("작업지시번호") + 1
+            job_col = STANDARD_HEADERS.index("work_order_no") + 1
         except ValueError:
             job_col = 0
         try:
-            date_col = STANDARD_HEADERS.index("날짜") + 1
+            date_col = STANDARD_HEADERS.index("created_date") + 1
         except ValueError:
             date_col = 1
 
@@ -359,7 +341,7 @@ def process_folders(
             if not job:
                 continue
             date_text = row[date_col] if date_col < len(row) else ""
-            dt = _parse_date_for_compare(str(date_text) if date_text is not None else "")
+            dt = parse_to_datetime(str(date_text) if date_text is not None else "")
             key = str(job)
             if key not in latest_by_job:
                 latest_by_job[key] = (dt, row)
@@ -408,27 +390,33 @@ def process_folders(
             if col < len(row_data) and row_data[col] is not None:
                 ws_out.cell(row=out_row, column=col, value=row_data[col])
 
+    # 자재입고수량: 수량변경 접미 제거 후 정수
+    try:
+        mat_idx = STANDARD_HEADERS.index("material_receipt_note") + 1
+        for r in range(2, num_rows_to_write + 2):
+            cell = ws_out.cell(row=r, column=mat_idx)
+            if cell.value is not None:
+                cell.value = material_receipt_cell_int(cell.value)
+    except Exception as e:
+        log(f"[경고] 자재입고수량 숫자 정규화 중 오류: {e}")
+
     # 날짜/고객사납품 컬럼을 날짜 타입으로 정규화
     try:
         try:
-            date_col_idx = STANDARD_HEADERS.index("날짜") + 1
+            date_col_idx = STANDARD_HEADERS.index("created_date") + 1
         except ValueError:
             date_col_idx = 1
         try:
-            cust_ship_idx = STANDARD_HEADERS.index("고객사\n납품") + 1
+            cust_ship_idx = STANDARD_HEADERS.index("cust_delivery_date") + 1
         except ValueError:
-            # 줄바꿈이 제거된 경우 대비
-            try:
-                cust_ship_idx = STANDARD_HEADERS.index("고객사납품") + 1
-            except ValueError:
-                cust_ship_idx = 0
+            cust_ship_idx = 0
 
         for r in range(2, num_rows_to_write + 2):
             # 날짜 컬럼
             if date_col_idx:
                 cell = ws_out.cell(row=r, column=date_col_idx)
                 if cell.value:
-                    dt = _parse_date_for_compare(str(cell.value))
+                    dt = parse_to_datetime(str(cell.value))
                     if dt != datetime.min:
                         cell.value = dt
                         cell.number_format = "yyyy-mm-dd"
@@ -437,7 +425,7 @@ def process_folders(
                 cell2 = ws_out.cell(row=r, column=cust_ship_idx)
                 if cell2.value and not isinstance(cell2.value, datetime):
                     # 텍스트일 가능성이 있을 때만 파싱 시도
-                    dt2 = _parse_date_for_compare(str(cell2.value))
+                    dt2 = parse_to_datetime(str(cell2.value))
                     if dt2 != datetime.min:
                         cell2.value = dt2
                         cell2.number_format = "yyyy-mm-dd"
@@ -449,11 +437,11 @@ def process_folders(
     # BOM파일명 = 작업지시번호 & " " & 고객사 & "_" & 품명 & "(" & 품번 & ")"
     # 발행리스트 = 사업명 & "-" & 품명 & "(" & 품번 & ")"
     try:
-        품명_col = STANDARD_HEADERS.index("품명") + 1
-        품번_col = STANDARD_HEADERS.index("품번") + 1
-        작업지시번호_col = STANDARD_HEADERS.index("작업지시번호") + 1
-        고객사_col = STANDARD_HEADERS.index("고객사") + 1
-        사업명_col = STANDARD_HEADERS.index("사업명") + 1
+        품명_col = STANDARD_HEADERS.index("product_name") + 1
+        품번_col = STANDARD_HEADERS.index("part_no") + 1
+        작업지시번호_col = STANDARD_HEADERS.index("work_order_no") + 1
+        고객사_col = STANDARD_HEADERS.index("customer_name") + 1
+        사업명_col = STANDARD_HEADERS.index("project_name") + 1
     except ValueError:
         품명_col = 품번_col = 작업지시번호_col = 고객사_col = 사업명_col = 1
 

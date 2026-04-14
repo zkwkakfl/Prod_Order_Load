@@ -35,14 +35,14 @@ from sqlite_query import (
 from version_info import get_version
 
 _FILTER_SPEC = [
-    ("작업지시번호", "작업지시번호"),
-    ("고객사", "고객사"),
-    ("사업명", "사업명"),
-    ("품명", "품명"),
-    ("품번", "품번"),
-    ("발주사양", "발주사양"),
-    ("날짜 시작", "날짜"),
-    ("날짜 종료", "날짜"),
+    ("작업지시번호", "work_order_no"),
+    ("고객사", "customer_name"),
+    ("사업명", "project_name"),
+    ("품명", "product_name"),
+    ("품번", "part_no"),
+    ("발주사양", "order_spec"),
+    ("날짜 시작", "created_date"),
+    ("날짜 종료", "created_date"),
 ]
 
 
@@ -85,6 +85,8 @@ class App:
 
         self._tv_cols: list[str] = []
         self._tv_by_iid: dict[str, tuple] = {}
+        self._tree_sort_col: str | None = None
+        self._tree_sort_desc: bool = False
 
         self.cb_data: list[ttk.Combobox] = []
 
@@ -466,37 +468,39 @@ class App:
     def _collect_folder_items_from_rows(self, cols: list[str], rows: list[tuple]) -> list[dict]:
         # 폴더 생성 + 파일 복사/표지입력에 필요한 컬럼
         required_cols = (
-            "폴더명",
-            "고객사",
-            "사업명",
-            "BOM파일명",
-            "작업지시번호",
-            "품명",
-            "품번",
-            "공정",
-            "고객사납품",
-            "자재입고수량",
-            "발주사양",
+            "folder_label",
+            "customer_name",
+            "project_name",
+            "bom_file_label",
+            "work_order_no",
+            "product_name",
+            "part_no",
+            "process_code",
+            "cust_delivery_date",
+            "material_receipt_note",
+            "order_spec",
+            "order_spec_detail",
         )
         for required in required_cols:
             if required not in cols:
                 messagebox.showwarning(
                     "열 없음",
-                    f"DB에 「{required}」 열이 없습니다.\n통합 후 데이터 탭에서 목록을 다시 불러오세요.",
+                    f"DB에 「{required}」 열이 없습니다.\n통합 실행으로 DB를 다시 만든 뒤 목록을 불러오세요.",
                 )
                 return []
 
-        i_folder = cols.index("폴더명")
-        i_cust = cols.index("고객사")
-        i_biz = cols.index("사업명")
-        i_bom = cols.index("BOM파일명")
-        i_job = cols.index("작업지시번호")
-        i_prod = cols.index("품명")
-        i_code = cols.index("품번")
-        i_proc = cols.index("공정")
-        i_ship = cols.index("고객사납품")
-        i_in = cols.index("자재입고수량")
-        i_spec = cols.index("발주사양")
+        i_folder = cols.index("folder_label")
+        i_cust = cols.index("customer_name")
+        i_biz = cols.index("project_name")
+        i_bom = cols.index("bom_file_label")
+        i_job = cols.index("work_order_no")
+        i_prod = cols.index("product_name")
+        i_code = cols.index("part_no")
+        i_proc = cols.index("process_code")
+        i_ship = cols.index("cust_delivery_date")
+        i_in = cols.index("material_receipt_note")
+        i_spec = cols.index("order_spec")
+        i_spec_d = cols.index("order_spec_detail")
 
         out: list[dict] = []
         for row in rows:
@@ -516,7 +520,14 @@ class App:
                 "" if row[i_proc] is None else str(row[i_proc]),
                 "" if row[i_ship] is None else str(row[i_ship]),
                 "" if row[i_in] is None else str(row[i_in]),
-                "" if row[i_spec] is None else str(row[i_spec]),
+                " ".join(
+                    p
+                    for p in (
+                        "" if row[i_spec] is None else str(row[i_spec]).strip(),
+                        "" if row[i_spec_d] is None else str(row[i_spec_d]).strip(),
+                    )
+                    if p
+                ).strip(),
             ]
             out.append(
                 {
@@ -635,13 +646,13 @@ class App:
 
     def _collect_folder_names_from_rows(self, cols: list[str], rows: list[tuple]) -> list[str]:
         # (레거시) 예전 방식 호환을 위해 남겨둠
-        if "폴더명" not in cols:
+        if "folder_label" not in cols:
             messagebox.showwarning(
                 "열 없음",
-                "DB에 「폴더명」 열이 없습니다.\n통합 후 데이터 탭에서 목록을 다시 불러오세요.",
+                "DB에 「folder_label」 열이 없습니다.\n통합 실행으로 DB를 다시 만든 뒤 목록을 불러오세요.",
             )
             return []
-        icol = cols.index("폴더명")
+        icol = cols.index("folder_label")
         names: list[str] = []
         for row in rows:
             v = row[icol] if icol < len(row) else None
@@ -684,7 +695,7 @@ class App:
         for i in range(6):
             col = _FILTER_SPEC[i][1]
             _apply_data(i, ["(전체)"] + fetch_distinct_column(db_path, col, limit=400))
-        date_vals = ["(전체)"] + fetch_distinct_column(db_path, "날짜", limit=500)
+        date_vals = ["(전체)"] + fetch_distinct_column(db_path, _FILTER_SPEC[6][1], limit=500)
         _apply_data(6, date_vals)
         _apply_data(7, date_vals)
 
@@ -762,12 +773,43 @@ class App:
         self._clear_filters()
         self._load_tree_from_db()
 
+    def _tree_column_widths(self, cols: list[str], rows: list[tuple], sample: int = 120) -> list[int]:
+        """
+        헤더·상위 샘플 행의 문자 길이로 열 너비(px)를 잡는다.
+        stretch=NO와 같이 쓰면 열 합이 뷰보다 커져 가로 스크롤이 활성화된다.
+        """
+        n = len(cols)
+        max_len = [max(4, len(name)) for name in cols]
+        for row in rows[: max(0, sample)]:
+            for j in range(min(n, len(row))):
+                cell = row[j]
+                s = "" if cell is None else str(cell)
+                if len(s) > max_len[j]:
+                    max_len[j] = len(s)
+        widths: list[int] = []
+        for j in range(n):
+            # 기본 폰트 기준 대략적인 픽셀 폭(한글 혼합 가정)
+            px = max_len[j] * 8 + 44
+            px = max(100, min(480, px))
+            widths.append(px)
+        return widths
+
+    def _on_tree_heading_click(self, col: str) -> None:
+        if self._tree_sort_col == col:
+            self._tree_sort_desc = not self._tree_sort_desc
+        else:
+            self._tree_sort_col = col
+            self._tree_sort_desc = False
+        self._load_tree_from_db()
+
     def _load_tree_from_db(self) -> None:
         db_path = Path(self.sqlite_path_var.get().strip())
         if not db_path.is_file():
             messagebox.showwarning("파일 없음", f"SQLite 파일이 없습니다.\n{db_path}")
             return
 
+        sort_col = self._tree_sort_col
+        sort_desc = self._tree_sort_desc
         cols, rows = query_consolidated(
             db_path,
             job_contains=self.filter_job.get(),
@@ -778,7 +820,14 @@ class App:
             spec_contains=self.filter_spec.get(),
             date_from=self.filter_date_from.get(),
             date_to=self.filter_date_to.get(),
+            order_by_column=sort_col,
+            order_desc=sort_desc,
         )
+        if self._tree_sort_col and self._tree_sort_col not in cols:
+            self._tree_sort_col = None
+            self._tree_sort_desc = False
+        sort_col = self._tree_sort_col
+        sort_desc = self._tree_sort_desc
         for c in self.tree.get_children():
             self.tree.delete(c)
         self.detail_text.delete("1.0", tk.END)
@@ -792,10 +841,19 @@ class App:
         shown = list(cols)
         idxs = list(range(len(cols)))
         self.tree["columns"] = shown
-        for cname in shown:
-            self.tree.heading(cname, text=cname)
-            w = min(220, max(72, min(len(cname) * 9 + 24, 180)))
-            self.tree.column(cname, width=w, minwidth=56, stretch=tk.YES)
+        col_widths = self._tree_column_widths(shown, rows)
+        for i, cname in enumerate(shown):
+            if sort_col == cname:
+                head = f"{cname} {'▼' if sort_desc else '▲'}"
+            else:
+                head = cname
+            self.tree.heading(
+                cname,
+                text=head,
+                command=lambda c=cname: self._on_tree_heading_click(c),
+            )
+            w = col_widths[i]
+            self.tree.column(cname, width=w, minwidth=72, stretch=tk.NO)
 
         for row in rows:
             rid = row[0]
@@ -806,7 +864,12 @@ class App:
             vals = tuple("" if row[j] is None else str(row[j]) for j in idxs)
             self.tree.insert("", tk.END, iid=iid, values=vals)
 
-        self.hint_var.set(f"[데이터 탭] {len(rows)}행, 열 {len(shown)}개 표시 (가로 스크롤)")
+        sort_note = ""
+        if sort_col:
+            sort_note = f" | 정렬: {sort_col} ({'내림차순' if sort_desc else '오름차순'})"
+        self.hint_var.set(
+            f"[데이터 탭] {len(rows)}행, 열 {len(shown)}개 — 헤더 클릭으로 정렬(같은 열 재클릭 시 방향 전환){sort_note}"
+        )
 
     def _on_tree_select(self, _evt=None) -> None:
         sel = self.tree.selection()
