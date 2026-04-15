@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from config import STANDARD_HEADERS
+from customer_name_norm import canonicalize_customer_name
 from date_norm import normalize_date_to_iso
 from field_change_strip import strip_field_change_suffix
 
 CONSOLIDATED_TABLE = "consolidated_data"
 FIELD_CHANGE_LOG_TABLE = "field_change_log"
+CUSTOMER_NAME_ALIASES_TABLE = "customer_name_aliases"
 
 
 def parse_material_receipt_qty(head: str | None) -> int | None:
@@ -93,6 +95,48 @@ def _value_for_sql(v) -> Optional[str]:
 
 def _quoted_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+def ensure_customer_name_aliases_table(cur: sqlite3.Cursor) -> None:
+    """
+    고객사명 별칭(alias) → 표준명(canonical) 테이블.
+    - alias: 원문/별칭 (PRIMARY KEY)
+    - canonical: 표준 고객사명
+    """
+    t = _quoted_ident(CUSTOMER_NAME_ALIASES_TABLE)
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {t} (
+            alias TEXT PRIMARY KEY,
+            canonical TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def load_customer_name_alias_map(cur: sqlite3.Cursor) -> dict[str, str]:
+    """alias→canonical 매핑을 메모리로 로드."""
+    ensure_customer_name_aliases_table(cur)
+    t = _quoted_ident(CUSTOMER_NAME_ALIASES_TABLE)
+    cur.execute(f"SELECT alias, canonical FROM {t}")
+    out: dict[str, str] = {}
+    for a, c in cur.fetchall():
+        if a is None or c is None:
+            continue
+        sa = str(a).strip()
+        sc = str(c).strip()
+        if sa and sc:
+            out[sa] = sc
+    return out
+
+
+def _drop_table_if_exists(cur: sqlite3.Cursor, table_name: str) -> None:
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if cur.fetchone():
+        cur.execute(f"DROP TABLE IF EXISTS {_quoted_ident(table_name)}")
 
 
 def material_receipt_cell_int(v) -> int | None:
@@ -235,10 +279,8 @@ def save_consolidated_to_sqlite(
 
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        if db_path.exists():
-            db_path.unlink()
     except OSError as e:
-        log(f"[SQLite 오류] 파일 준비 실패: {db_path} - {e}")
+        log(f"[SQLite 오류] 폴더 준비 실패: {db_path.parent} - {e}")
         return False
 
     def _append_stripped_string(raw: Optional[str], h: str, audits: list[tuple[str, str]], out: list) -> None:
@@ -254,6 +296,12 @@ def save_consolidated_to_sqlite(
         conn = sqlite3.connect(str(db_path))
         try:
             cur = conn.cursor()
+            # DB 파일은 유지하고, 통합 결과 테이블만 재생성한다.
+            # (별칭 테이블 등 누적 자산은 보존)
+            ensure_customer_name_aliases_table(cur)
+            alias_map = load_customer_name_alias_map(cur)
+            _drop_table_if_exists(cur, FIELD_CHANGE_LOG_TABLE)
+            _drop_table_if_exists(cur, CONSOLIDATED_TABLE)
             cur.execute(create_sql)
             ensure_field_change_log_table(cur)
             for i, row_data in enumerate(rows):
@@ -290,6 +338,17 @@ def save_consolidated_to_sqlite(
                             if tail:
                                 audits.append((h, tail))
                             vals.append(parse_material_receipt_qty(head))
+                    elif h == "customer_name":
+                        v = row_data[j] if j < len(row_data) else None
+                        if v is None:
+                            vals.append(None)
+                        else:
+                            sv = _stringify_for_strip(v)
+                            head, tail = strip_field_change_suffix(sv)
+                            if tail:
+                                audits.append((h, tail))
+                            canon = canonicalize_customer_name(head, alias_map)
+                            vals.append(_value_for_sql(canon))
                     else:
                         v = row_data[j] if j < len(row_data) else None
                         if v is None:
@@ -310,11 +369,6 @@ def save_consolidated_to_sqlite(
             conn.close()
     except sqlite3.Error as e:
         log(f"[SQLite 오류] 저장 실패: {db_path} - {e}")
-        try:
-            if db_path.exists():
-                db_path.unlink()
-        except OSError:
-            pass
         return False
 
     log(f"[SQLite] 저장 완료: {db_path} (총 {len(rows)}행)")

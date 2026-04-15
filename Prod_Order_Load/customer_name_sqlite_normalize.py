@@ -1,86 +1,41 @@
 # -*- coding: utf-8 -*-
 """
 consolidated_data.customer_name 정규화:
-- 반각 () / 전각 （） 괄호 처리
-  · 괄호 안에 한 글도 한글이 없으면(영문 블록): 그 안의 문자열만 남기고 나머지 전부 삭제.
-    여러 개면 공백 한 칸으로 이어 붙임. 예) "위드 (WithTech)" -> "WithTech"
-  · 괄호 안에 한글이 하나라도 있으면: 괄호와 안쪽만 삭제(바깥 텍스트는 유지).
-- 줄바꿈·탭·연속 공백 정리
+1) 괄호/공백 정규화(customer_name_norm.normalize_customer_name)
+2) customer_name_aliases(alias→canonical) 적용
+3) --apply 시 consolidated_data.customer_name을 canonical로 UPDATE
+4) 치환 전 값(정규화된 alias)은 customer_name_aliases에 upsert(재통합 시 재사용)
 """
 
 from __future__ import annotations
 
 import argparse
 import random
-import re
 import sqlite3
 import sys
 from pathlib import Path
 
-from sqlite_export import CONSOLIDATED_TABLE, _quoted_ident
-
-# 한글 음절 + 호환 자모 (괄호 안에 하나라도 있으면 '비영문'으로 간주)
-_HANGUL = re.compile(r"[\u3131-\u318F\uAC00-\uD7A3]")
-
-# 반각 ( ) — 중첩 없이 한 단계만 처리
-_PAREN_HALF = re.compile(r"\(([^()]*)\)")
-# 전각 （ ）
-_PAREN_FULL = re.compile(r"（([^（）]*)）")
-
-
-def _collapse_ws(s: str) -> str:
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[\n\t]+", " ", s)
-    s = re.sub(r" +", " ", s).strip()
-    return s
+from customer_name_norm import canonicalize_customer_name, collapse_ws, normalize_customer_name
+from sqlite_export import (
+    CONSOLIDATED_TABLE,
+    CUSTOMER_NAME_ALIASES_TABLE,
+    _quoted_ident,
+    ensure_customer_name_aliases_table,
+    load_customer_name_alias_map,
+)
 
 
-def _inner_is_latinish(inner: str) -> bool:
-    """한글이 없으면 True (괄호 안을 '영문 블록'으로 본다)."""
-    t = inner.strip()
-    if not t:
-        return False
-    return _HANGUL.search(t) is None
-
-
-def _next_paren_match(s: str) -> re.Match[str] | None:
-    """문자열에서 가장 앞에 나오는 반각/전각 괄호 매치 하나."""
-    m1 = _PAREN_HALF.search(s)
-    m2 = _PAREN_FULL.search(s)
-    candidates = [m for m in (m1, m2) if m]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda m: m.start())
-
-
-def normalize_customer_name(value: str | None) -> str | None:
-    """
-    영문만 있는 괄호가 하나라도 있으면: 그 괄호 안 문자열만(여러 개면 공백 구분) 반환.
-    그런 괄호가 없으면: 한글 포함 괄호만 제거한 뒤 공백 정리.
-    """
-    if value is None:
-        return None
-    s = _collapse_ws(str(value))
-    if not s:
-        return None
-
-    english_parts: list[str] = []
-    rest = s
-    while True:
-        m = _next_paren_match(rest)
-        if not m:
-            break
-        inner = m.group(1).strip()
-        before = rest[: m.start()]
-        after = rest[m.end() :]
-        if _inner_is_latinish(inner):
-            english_parts.append(inner)
-        rest = before + " " + after
-    rest = _collapse_ws(rest)
-
-    if english_parts:
-        return _collapse_ws(" ".join(english_parts))
-    return rest if rest else None
+DEFAULT_ALIASES: dict[str, str] = {
+    # 스크린샷 기반(필요 시 여기 추가)
+    "KB테크": "KB-TECH",
+    "LIG 정밀기술": "LIG정밀기술",
+    "글랜에어테크놀리지": "글랜에어테크놀로지",
+    "글린에어테크놀로지": "글랜에어테크놀로지",
+    "시그윅스": "시그웍스",
+    "아이스펙": "아이스팩",
+    "웨이브": "웨이브일렉트로닉스",
+    "웨이브 일렉트로닉스": "웨이브일렉트로닉스",
+}
 
 
 def _print_samples(
@@ -106,7 +61,34 @@ def _print_samples(
         print(f"  결과: {new_v!r}")
 
 
-def _run(db_path: Path, *, apply: bool, samples: int, random_sample: bool) -> int:
+def _upsert_aliases(cur: sqlite3.Cursor, alias_to_canon: dict[str, str]) -> int:
+    ensure_customer_name_aliases_table(cur)
+    t = _quoted_ident(CUSTOMER_NAME_ALIASES_TABLE)
+    sql = (
+        f"INSERT INTO {t} (alias, canonical, updated_at) "
+        f"VALUES (?, ?, datetime('now','localtime')) "
+        f"ON CONFLICT(alias) DO UPDATE SET "
+        f"canonical=excluded.canonical, updated_at=excluded.updated_at"
+    )
+    n = 0
+    for a, c in alias_to_canon.items():
+        sa = collapse_ws(str(a))
+        sc = collapse_ws(str(c))
+        if not sa or not sc:
+            continue
+        cur.execute(sql, (sa, sc))
+        n += 1
+    return n
+
+
+def _run(
+    db_path: Path,
+    *,
+    apply: bool,
+    samples: int,
+    random_sample: bool,
+    sync_default_aliases: bool,
+) -> int:
     if not db_path.is_file():
         print(f"[오류] DB 파일 없음: {db_path}", file=sys.stderr)
         return 1
@@ -114,6 +96,11 @@ def _run(db_path: Path, *, apply: bool, samples: int, random_sample: bool) -> in
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
+        if sync_default_aliases:
+            n = _upsert_aliases(cur, DEFAULT_ALIASES)
+            conn.commit()
+            print(f"[별칭] 기본 매핑 {n}건 upsert")
+        alias_map = load_customer_name_alias_map(cur)
         cur.execute(
             f"SELECT id, {_quoted_ident('customer_name')} "
             f"FROM {_quoted_ident(CONSOLIDATED_TABLE)} "
@@ -125,7 +112,7 @@ def _run(db_path: Path, *, apply: bool, samples: int, random_sample: bool) -> in
 
     updates: list[tuple[int, str | None, str | None]] = []
     for row_id, raw in rows:
-        new_v = normalize_customer_name(raw)
+        new_v = canonicalize_customer_name(raw, alias_map)
         if (raw or "") != (new_v or ""):
             updates.append((row_id, raw, new_v))
 
@@ -139,14 +126,23 @@ def _run(db_path: Path, *, apply: bool, samples: int, random_sample: bool) -> in
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
+        ensure_customer_name_aliases_table(cur)
         sql = (
             f"UPDATE {_quoted_ident(CONSOLIDATED_TABLE)} "
             f"SET {_quoted_ident('customer_name')} = ?, "
             f"{_quoted_ident('update_at')} = datetime('now', 'localtime') "
             f"WHERE id = ?"
         )
-        for row_id, _raw, new_v in updates:
+        # 치환 전 값은 alias로 upsert하여 재통합 시에도 적용되게 한다.
+        alias_upserts: dict[str, str] = {}
+        for row_id, raw, new_v in updates:
+            raw_norm = normalize_customer_name(raw)
+            if raw_norm and new_v and raw_norm != new_v:
+                alias_upserts[raw_norm] = new_v
             cur.execute(sql, (new_v, row_id))
+        if alias_upserts:
+            n2 = _upsert_aliases(cur, alias_upserts)
+            print(f"[별칭] 변경분 alias {n2}건 upsert")
         conn.commit()
     finally:
         conn.close()
@@ -178,12 +174,18 @@ def main() -> int:
         action="store_true",
         help="앞에서부터가 아니라 변경 대상 중 랜덤 샘플 출력",
     )
+    p.add_argument(
+        "--sync-default-aliases",
+        action="store_true",
+        help="DEFAULT_ALIASES(코드 내 매핑)를 customer_name_aliases에 upsert",
+    )
     args = p.parse_args()
     return _run(
         args.db.resolve(),
         apply=args.apply,
         samples=max(0, args.samples),
         random_sample=args.random_sample,
+        sync_default_aliases=bool(args.sync_default_aliases),
     )
 
 
