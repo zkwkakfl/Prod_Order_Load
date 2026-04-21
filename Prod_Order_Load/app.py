@@ -45,6 +45,14 @@ _FILTER_SPEC = [
     ("날짜 종료", "created_date"),
 ]
 
+# 트리·상세 패널 표시용 (DB 컬럼명 → 한글)
+_TREE_COLUMN_LABELS: dict[str, str] = {
+    "schedule_material_inspect": "조립일정·자재검수",
+    "schedule_smt": "조립일정·SMT",
+    "schedule_imt": "조립일정·IMT",
+    "schedule_inspection": "조립일정·검사",
+}
+
 
 class App:
     def __init__(self):
@@ -173,7 +181,6 @@ class App:
         self.btn_run = ttk.Button(btns, text="통합 실행 (SQLite 갱신)", command=self._run)
         self.btn_run.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btns, text="설정 관리...", command=self._open_settings_manager).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btns, text="SQLite 열기", command=self._open_sqlite_file).pack(side=tk.LEFT, padx=(0, 8))
         self.btn_open_result = ttk.Button(btns, text="결과 엑셀 열기", command=self._open_result_file, state=tk.DISABLED)
         self.btn_open_result.pack(side=tk.LEFT)
 
@@ -755,16 +762,6 @@ class App:
         except OSError as e:
             messagebox.showerror("열기 실패", str(e))
 
-    def _open_sqlite_file(self) -> None:
-        p = Path(self.sqlite_path_var.get().strip())
-        if not p.is_file():
-            messagebox.showwarning("파일 없음", f"SQLite 파일이 없습니다.\n{p}")
-            return
-        try:
-            os.startfile(str(p.resolve()))
-        except OSError as e:
-            messagebox.showerror("열기 실패", str(e))
-
     def _clear_filters(self) -> None:
         for v in self._filter_vars:
             v.set("(전체)")
@@ -843,10 +840,11 @@ class App:
         self.tree["columns"] = shown
         col_widths = self._tree_column_widths(shown, rows)
         for i, cname in enumerate(shown):
+            label = _TREE_COLUMN_LABELS.get(cname, cname)
             if sort_col == cname:
-                head = f"{cname} {'▼' if sort_desc else '▲'}"
+                head = f"{label} {'▼' if sort_desc else '▲'}"
             else:
-                head = cname
+                head = label
             self.tree.heading(
                 cname,
                 text=head,
@@ -866,7 +864,8 @@ class App:
 
         sort_note = ""
         if sort_col:
-            sort_note = f" | 정렬: {sort_col} ({'내림차순' if sort_desc else '오름차순'})"
+            sort_label = _TREE_COLUMN_LABELS.get(sort_col, sort_col)
+            sort_note = f" | 정렬: {sort_label} ({'내림차순' if sort_desc else '오름차순'})"
         self.hint_var.set(
             f"[데이터 탭] {len(rows)}행, 열 {len(shown)}개 — 헤더 클릭으로 정렬(같은 열 재클릭 시 방향 전환){sort_note}"
         )
@@ -880,7 +879,10 @@ class App:
         row = self._tv_by_iid.get(iid)
         if not row:
             return
-        lines = [f"{name}: {row[i] if i < len(row) else ''}" for i, name in enumerate(self._tv_cols)]
+        lines = [
+            f"{_TREE_COLUMN_LABELS.get(name, name)}: {row[i] if i < len(row) else ''}"
+            for i, name in enumerate(self._tv_cols)
+        ]
         self.detail_text.insert(tk.END, "\n".join(lines))
 
     def _edit_source_paths(self) -> None:

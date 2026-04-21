@@ -10,9 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from config import SCHEDULE_HEADER_FIELDS
 from date_norm import parse_to_datetime
 
 CONSOLIDATED_TABLE = "consolidated_data"
+_DATE_SORT_COLUMNS = frozenset(("created_date", *SCHEDULE_HEADER_FIELDS))
 
 
 def _qi(name: str) -> str:
@@ -118,7 +120,7 @@ def query_consolidated(
         conn.create_function("date_norm_sort", 1, _sqlite_date_sort_key)
         if ob and ob in cols:
             direction = "DESC" if order_desc else "ASC"
-            if ob == "created_date":
+            if ob in _DATE_SORT_COLUMNS:
                 order_sql = f"ORDER BY date_norm_sort({_qi(ob)}) {direction}, {_qi('id')} DESC"
             else:
                 order_sql = f"ORDER BY {_qi(ob)} {direction}, {_qi('id')} DESC"

@@ -15,6 +15,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from config import (
+    ASSEMBLY_SCHEDULE_SHEET_HEADER_ALIASES,
     DEFAULT_SOURCE_FOLDER_PATHS,
     SOURCE_PATHS_FILE,
     DEST_SHEET_NAME,
@@ -23,9 +24,11 @@ from config import (
     SOURCE_HEADER_ROW,
     SOURCE_DATA_START_ROW,
     SOURCE_FIRST_COL,
+    SCHEDULE_HEADER_FIELDS,
     SHEET_HEADER_ALIASES_PER_COL,
     STANDARD_HEADERS,
 )
+from assembly_schedule_parse import parse_assembly_schedule_cell
 from date_norm import clean_date_text, normalize_date_to_iso, parse_to_datetime
 from order_spec_split import split_order_spec_cell
 from sqlite_export import material_receipt_cell_int, save_consolidated_to_sqlite, load_customer_name_alias_map
@@ -60,6 +63,11 @@ def _build_header_map() -> dict[str, int]:
 
 def _norm_header(name: str) -> str:
     return (name or "").strip()
+
+
+def _header_compact(name: str) -> str:
+    """시트 머리글 비교용: 공백·줄바꿈 제거."""
+    return re.sub(r"[\s\n\r]+", "", (name or "").strip())
 
 
 def _trim_cell_value(val):
@@ -231,6 +239,13 @@ def process_folders(
                     col = header_map.get(h) or header_map.get(re.sub(r"[\s\n\r]+", "", h))
                     target_order.append(col if col else 0)
 
+                sched_key_set = {_header_compact(a) for a in ASSEMBLY_SCHEDULE_SHEET_HEADER_ALIASES}
+                schedule_source_j: int | None = None
+                for j, hn in enumerate(headers):
+                    if _header_compact(hn) in sched_key_set:
+                        schedule_source_j = j
+                        break
+
                 # 데이터 행: header_row 다음부터 data_start_row까지는 스킵, 이후부터 사용
                 add_date = _parse_date_from_sheet_and_book(name, book_name)
                 current_row_index = header_row_idx
@@ -263,6 +278,34 @@ def process_folders(
                             row_data[osi] = kind
                             if odi < len(row_data):
                                 row_data[odi] = detail
+                    try:
+                        i_sm = STANDARD_HEADERS.index("schedule_material_inspect") + 1
+                        i_smt = STANDARD_HEADERS.index("schedule_smt") + 1
+                        i_imt = STANDARD_HEADERS.index("schedule_imt") + 1
+                        i_insp = STANDARD_HEADERS.index("schedule_inspection") + 1
+                    except ValueError:
+                        i_sm = i_smt = i_imt = i_insp = 0
+                    if schedule_source_j is not None and i_sm:
+                        raw_sched = (
+                            data_row[schedule_source_j]
+                            if schedule_source_j < len(data_row)
+                            else None
+                        )
+                        tv = _trim_cell_value(raw_sched)
+                        if tv is not None:
+                            sraw = str(tv).strip()
+                            head, _ = strip_field_change_suffix(sraw)
+                            smi, ssmt, simt, sinsp = parse_assembly_schedule_cell(head)
+                        else:
+                            smi = ssmt = simt = sinsp = None
+                        if i_sm < len(row_data):
+                            row_data[i_sm] = smi
+                        if i_smt < len(row_data):
+                            row_data[i_smt] = ssmt
+                        if i_imt < len(row_data):
+                            row_data[i_imt] = simt
+                        if i_insp < len(row_data):
+                            row_data[i_insp] = sinsp
                     job_val = (
                         row_data[job_col_idx]
                         if job_col_idx and job_col_idx < len(row_data)
@@ -400,6 +443,10 @@ def process_folders(
             idx_cust = STANDARD_HEADERS.index("customer_name") + 1
         except ValueError:
             idx_cust = 0
+        try:
+            schedule_indices = [STANDARD_HEADERS.index(h) + 1 for h in SCHEDULE_HEADER_FIELDS]
+        except ValueError:
+            schedule_indices = []
 
         folder_col, bom_col, issue_col = _get_column_indices()
         out_rows: list[list] = []
@@ -424,6 +471,12 @@ def process_folders(
                 if col == idx_cust:
                     head, _ = strip_field_change_suffix(str(v))
                     out[col] = canonicalize_customer_name(head, alias_map) if head else None
+                    continue
+
+                if col in schedule_indices:
+                    head, _ = strip_field_change_suffix(str(v))
+                    iso = normalize_date_to_iso(clean_date_text(head)) if head else None
+                    out[col] = iso if iso else None
                     continue
 
                 if isinstance(v, str):
@@ -480,6 +533,10 @@ def process_folders(
             cust_ship_idx = STANDARD_HEADERS.index("cust_delivery_date") + 1
         except ValueError:
             cust_ship_idx = 0
+        try:
+            schedule_col_idxs = [STANDARD_HEADERS.index(h) + 1 for h in SCHEDULE_HEADER_FIELDS]
+        except ValueError:
+            schedule_col_idxs = []
 
         for r in range(2, num_rows_to_write + 2):
             # 날짜 컬럼
@@ -499,6 +556,13 @@ def process_folders(
                     if dt2 != datetime.min:
                         cell2.value = dt2
                         cell2.number_format = "yyyy-mm-dd"
+            for scol in schedule_col_idxs:
+                cell_s = ws_out.cell(row=r, column=scol)
+                if cell_s.value and not isinstance(cell_s.value, datetime):
+                    dts = parse_to_datetime(str(cell_s.value))
+                    if dts != datetime.min:
+                        cell_s.value = dts
+                        cell_s.number_format = "yyyy-mm-dd"
     except Exception as e:
         log(f"[경고] 날짜 컬럼 타입 정규화 중 오류: {e}")
 

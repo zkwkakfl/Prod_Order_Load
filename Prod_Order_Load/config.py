@@ -56,10 +56,28 @@ STANDARD_HEADERS = [
     "material_receipt_note",
     "order_spec",
     "order_spec_detail",
+    # 조립공정일정(소스 1열·여러 줄) → 파서로 4필드 분리
+    "schedule_material_inspect",
+    "schedule_smt",
+    "schedule_imt",
+    "schedule_inspection",
     "folder_label",       # 수식·계산
     "bom_file_label",     # 수식·계산
     "release_list_label", # 수식·계산
 ]
+
+# 소스 시트 헤더가 아래 중 하나(공백·줄바꿈 무시 후 비교)이면 해당 열을 조립공정일정으로 본다.
+ASSEMBLY_SCHEDULE_SHEET_HEADER_ALIASES: tuple[str, ...] = (
+    "조립공정일정",
+)
+
+# SQLite/엑셀 컬럼명 — consolidation·엑셀 날짜 서식에서 공통 사용
+SCHEDULE_HEADER_FIELDS: tuple[str, ...] = (
+    "schedule_material_inspect",
+    "schedule_smt",
+    "schedule_imt",
+    "schedule_inspection",
+)
 
 # 소스 엑셀 시트 머리글(한글 등) → 위 STANDARD_HEADERS와 같은 순서.
 # consolidation._build_header_map 에서 열 번호로 매핑한다.
@@ -75,6 +93,10 @@ SHEET_HEADER_ALIASES_PER_COL: list[list[str]] = [
     ["자재입고수량", "자재입고\n수량", "수량"],
     ["발주사양", "발주사양(생산기술검토)"],
     [],
+    [],  # schedule_material_inspect — 조립공정일정 열에서만 파싱
+    [],  # schedule_smt
+    [],  # schedule_imt
+    [],  # schedule_inspection
     ["폴더명"],
     ["BOM파일명"],
     ["발행리스트"],

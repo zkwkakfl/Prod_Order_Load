@@ -30,6 +30,23 @@ python app.py
 GUI에서 **저장 경로**와 **파일명**을 확인·변경한 뒤 **통합 실행**을 누르면 됩니다.  
 기본 저장 위치는 스크립트가 있는 폴더, 기본 파일명은 `공정발주내역.xlsx`입니다.
 
+## 유지보수 스크립트 (`tools/`)
+
+프로젝트 루트(`Prod_Order_Load`)에서 실행합니다. 기본 DB는 `공정발주내역.sqlite`입니다.
+
+- 필드변경 접미 제거 + `field_change_log` 적재:
+
+```bash
+python tools/migrate_strip_field_changes.py
+```
+
+- 고객사명 정규화(미리보기만; 실제 반영은 `--apply`):
+
+```bash
+python tools/customer_name_sqlite_normalize.py
+python tools/customer_name_sqlite_normalize.py --apply
+```
+
 ## 동작 요약
 
 - **소스 경로**: `source_paths.json`(유저폼에서 관리) 또는 `config.py`의 기본 경로를 사용합니다.
