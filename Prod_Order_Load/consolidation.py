@@ -28,9 +28,12 @@ from config import (
 )
 from date_norm import clean_date_text, normalize_date_to_iso, parse_to_datetime
 from order_spec_split import split_order_spec_cell
-from sqlite_export import material_receipt_cell_int, save_consolidated_to_sqlite
+from sqlite_export import material_receipt_cell_int, save_consolidated_to_sqlite, load_customer_name_alias_map
+from customer_name_norm import canonicalize_customer_name
+from field_change_strip import strip_field_change_suffix
 
 import json
+import sqlite3
 
 
 # --- 헤더 별칭: 소스 시트에 적힌 이름 → 기준 열 번호(1-based) ---
@@ -369,6 +372,73 @@ def process_folders(
         log("엑셀 저장 생략: SQLite만 갱신했습니다.")
         return True
 
+    def _normalize_rows_for_excel(in_rows: list[list], dbp: Path) -> list[list]:
+        """
+        SQLite 저장과 동일한 정규화 규칙을 엑셀 저장에도 적용한다.
+        - '...변경: ...' 꼬리 제거
+        - 고객사명 canonicalize(alias→canonical)
+        - created_date: ISO(YYYY-MM-DD)로 정규화(가능할 때)
+        - 나머지 문자열: strip + 꼬리 제거
+        - 수식 컬럼(folder/bom/release)은 엑셀에서 수식으로 채우므로 여기서는 건드리지 않음
+        """
+        try:
+            conn = sqlite3.connect(str(dbp))
+            try:
+                cur = conn.cursor()
+                alias_map = load_customer_name_alias_map(cur)
+            finally:
+                conn.close()
+        except Exception as e:
+            log(f"[경고] 고객사 alias 로드 실패(엑셀 고객사 정규화 일부 생략): {e}")
+            alias_map = {}
+
+        try:
+            idx_created = STANDARD_HEADERS.index("created_date") + 1
+        except ValueError:
+            idx_created = 1
+        try:
+            idx_cust = STANDARD_HEADERS.index("customer_name") + 1
+        except ValueError:
+            idx_cust = 0
+
+        folder_col, bom_col, issue_col = _get_column_indices()
+        out_rows: list[list] = []
+        for row_data in in_rows:
+            # 1-based 구조 유지
+            out = list(row_data)
+            for col in range(1, len(STANDARD_HEADERS) + 1):
+                if col >= len(out):
+                    break
+                if col in (folder_col, bom_col, issue_col):
+                    continue
+                v = out[col]
+                if v is None:
+                    continue
+
+                if col == idx_created:
+                    head, _ = strip_field_change_suffix(str(v))
+                    iso = normalize_date_to_iso(clean_date_text(head)) if head else None
+                    out[col] = iso if iso else (head if head else None)
+                    continue
+
+                if col == idx_cust:
+                    head, _ = strip_field_change_suffix(str(v))
+                    out[col] = canonicalize_customer_name(head, alias_map) if head else None
+                    continue
+
+                if isinstance(v, str):
+                    head, _ = strip_field_change_suffix(v)
+                    out[col] = (head.strip() if isinstance(head, str) else head) if head else None
+                else:
+                    head, _ = strip_field_change_suffix(str(v))
+                    out[col] = head.strip() if head else None
+
+            out_rows.append(out)
+        return out_rows
+
+    # 엑셀 저장용 rows는 SQLite와 동일 규칙으로 정규화
+    rows_for_excel = _normalize_rows_for_excel(rows, db_path)
+
     # 출력: 새 워크북, 1행 헤더, 2행부터 데이터
     try:
         wb_out = Workbook()
@@ -383,8 +453,8 @@ def process_folders(
         ws_out.cell(row=1, column=col, value=h)
 
     # 2행부터 데이터 (row_data는 1-based: row_data[1]=1열)
-    num_rows_to_write = len(rows)
-    for i, row_data in enumerate(rows):
+    num_rows_to_write = len(rows_for_excel)
+    for i, row_data in enumerate(rows_for_excel):
         out_row = i + 2
         for col in range(1, num_std_cols + 1):
             if col < len(row_data) and row_data[col] is not None:
