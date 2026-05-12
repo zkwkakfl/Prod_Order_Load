@@ -72,7 +72,7 @@ def _computed_folder_bom_issue(row_data: list) -> tuple[Optional[str], Optional[
 
     folder = f"{name}({code})" if name and code else None
     bom = f"{job} {cust}_{name}({code})" if job and cust and name and code else None
-    issue = f"{proj}-{name}({code})" if proj and name and code else None
+    issue = (f"{proj}-{name}({code})" if proj else f"{name}({code})") if name and code else None
     return folder, bom, issue
 
 

@@ -65,7 +65,7 @@ class App:
 
         self.output_dir = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
         self.output_filename = tk.StringVar(value=DEFAULT_OUTPUT_FILENAME)
-        self.save_excel_var = tk.BooleanVar(value=False)
+        self.save_excel_var = tk.BooleanVar(value=True)
         self.running = False
         self._cust_norm_running = False
         self._cust_norm_probe_running = False
@@ -109,6 +109,8 @@ class App:
         self.folder_create_base_var = tk.StringVar(value=_fc.get("base_path") or str(DEFAULT_OUTPUT_DIR))
         self.folder_template_var = tk.StringVar(value=_fc.get("template_xlsx_path") or "")
         self.folder_cover_sheet_var = tk.StringVar(value=_fc.get("cover_sheet_name") or "표지")
+        self.folder_create_subfolder_var = tk.BooleanVar(value=True)
+        self.folder_create_coord_xlsx_var = tk.BooleanVar(value=True)
 
         self._build_ui()
         self._startup_load_db()
@@ -239,8 +241,13 @@ class App:
             row=1, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 4)
         )
 
+        opt = ttk.Frame(fc)
+        opt.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 2))
+        ttk.Checkbutton(opt, text="하위 폴더 생성", variable=self.folder_create_subfolder_var).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Checkbutton(opt, text="좌표 엑셀 파일 생성", variable=self.folder_create_coord_xlsx_var).pack(side=tk.LEFT)
+
         act = ttk.Frame(fc)
-        act.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 4))
+        act.grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 4))
         ttk.Button(act, text="선택 행만", command=self._run_folder_create_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(act, text="현재 목록 전체", command=self._run_folder_create_all_filtered).pack(side=tk.LEFT)
 
@@ -595,6 +602,8 @@ class App:
         subs = list(st.get("subfolders") or [])
         template_path = Path((st.get("template_xlsx_path") or "").strip())
         cover_sheet = (st.get("cover_sheet_name") or "표지").strip() or "표지"
+        create_subfolder = bool(self.folder_create_subfolder_var.get())
+        create_coord_xlsx = bool(self.folder_create_coord_xlsx_var.get())
 
         def work() -> None:
             err_tail = ""
@@ -609,27 +618,25 @@ class App:
                 err_tail = str(e)
             ok_p, sk, errs = 0, 0, []
             if not err_tail:
-                # 1) 폴더 구조: base/group/폴더명/(sub...)
                 pairs = [(it["group"], it["folder"]) for it in items]
+                actual_subs = subs if create_subfolder else []
                 ok_p, sk, errs = create_folder_structure_grouped(
                     Path(base_str),
                     pairs,
-                    subs,
+                    actual_subs,
                     log=self._log,
                 )
-                # 2) 파일 생성/복사: base/group 에 생성
                 base = Path(base_str)
                 for it in items:
                     group_dir = base / it["group"]
                     group_dir.mkdir(parents=True, exist_ok=True)
 
-                    # A) 새 워크북 생성: {폴더명}-표.xlsx
-                    blank_name = f'{it["folder"]}-좌표.xlsx'
-                    ok1, e1 = create_blank_workbook(dest_xlsx=group_dir / blank_name, log=self._log)
-                    if (not ok1) and e1:
-                        errs.append(f'{it["group"]}/{blank_name}: {e1}')
+                    if create_coord_xlsx:
+                        blank_name = f'{it["folder"]}-좌표.xlsx'
+                        ok1, e1 = create_blank_workbook(dest_xlsx=group_dir / blank_name, log=self._log)
+                        if (not ok1) and e1:
+                            errs.append(f'{it["group"]}/{blank_name}: {e1}')
 
-                    # B) 템플릿 복사 + 표지 입력: {BOM파일명}.xlsx
                     bom_base = it.get("bom_filename") or ""
                     if bom_base:
                         dest = group_dir / f"{bom_base}.xlsx"

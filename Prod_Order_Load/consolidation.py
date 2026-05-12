@@ -593,10 +593,16 @@ def process_folders(
                 value=f'=IF(OR(ISBLANK({get_column_letter(작업지시번호_col)}{r}),ISBLANK({get_column_letter(고객사_col)}{r})),"",{get_column_letter(작업지시번호_col)}{r}&" "&{get_column_letter(고객사_col)}{r}&"_"&{get_column_letter(품명_col)}{r}&"("&{get_column_letter(품번_col)}{r}&")")',
             )
         if issue_col:
+            pn = get_column_letter(품명_col)
+            pc = get_column_letter(품번_col)
+            pj = get_column_letter(사업명_col)
             ws_out.cell(
                 row=r,
                 column=issue_col,
-                value=f'=IF(OR(ISBLANK({get_column_letter(사업명_col)}{r}),ISBLANK({get_column_letter(품명_col)}{r})),"",{get_column_letter(사업명_col)}{r}&"-"&{get_column_letter(품명_col)}{r}&"("&{get_column_letter(품번_col)}{r}&")")',
+                value=(
+                    f'=IF(OR(ISBLANK({pn}{r}),ISBLANK({pc}{r})),"",IF(ISBLANK({pj}{r}),'
+                    f'{pn}{r}&"("&{pc}{r}&")",{pj}{r}&"-"&{pn}{r}&"("&{pc}{r}&")"))'
+                ),
             )
 
     _apply_autofilter_and_style(ws_out, log, DEST_SHEET_NAME)
