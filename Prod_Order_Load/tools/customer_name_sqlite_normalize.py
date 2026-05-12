@@ -16,6 +16,7 @@ import argparse
 import random
 import sqlite3
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +31,16 @@ from sqlite_export import (
     ensure_customer_name_aliases_table,
     load_customer_name_alias_map,
 )
+
+
+def _log_line(log: Callable[[str], None] | None, msg: str, *, err: bool = False) -> None:
+    """CLI는 print, GUI는 log 콜백으로만 출력."""
+    text = msg.rstrip("\n")
+    if log:
+        log(text)
+        return
+    stream = sys.stderr if err else sys.stdout
+    print(text, file=stream)
 
 
 DEFAULT_ALIASES: dict[str, str] = {
@@ -50,9 +61,10 @@ def _print_samples(
     *,
     limit: int,
     random_sample: bool,
+    log: Callable[[str], None] | None,
 ) -> None:
     if not updates:
-        print("샘플 없음: 변경 대상이 없습니다.")
+        _log_line(log, "샘플 없음: 변경 대상이 없습니다.")
         return
 
     sample_rows = list(updates)
@@ -61,11 +73,11 @@ def _print_samples(
     else:
         sample_rows = sample_rows[:limit]
 
-    print(f"샘플 {len(sample_rows)}건")
+    _log_line(log, f"샘플 {len(sample_rows)}건")
     for row_id, raw, new_v in sample_rows:
-        print(f"[id={row_id}]")
-        print(f"  원본: {raw!r}")
-        print(f"  결과: {new_v!r}")
+        _log_line(log, f"[id={row_id}]")
+        _log_line(log, f"  원본: {raw!r}")
+        _log_line(log, f"  결과: {new_v!r}")
 
 
 def _upsert_aliases(cur: sqlite3.Cursor, alias_to_canon: dict[str, str]) -> int:
@@ -95,9 +107,10 @@ def _run(
     samples: int,
     random_sample: bool,
     sync_default_aliases: bool,
+    log: Callable[[str], None] | None = None,
 ) -> int:
     if not db_path.is_file():
-        print(f"[오류] DB 파일 없음: {db_path}", file=sys.stderr)
+        _log_line(log, f"[오류] DB 파일 없음: {db_path}", err=True)
         return 1
 
     conn = sqlite3.connect(str(db_path))
@@ -106,7 +119,7 @@ def _run(
         if sync_default_aliases:
             n = _upsert_aliases(cur, DEFAULT_ALIASES)
             conn.commit()
-            print(f"[별칭] 기본 매핑 {n}건 upsert")
+            _log_line(log, f"[별칭] 기본 매핑 {n}건 upsert")
         alias_map = load_customer_name_alias_map(cur)
         cur.execute(
             f"SELECT id, {_quoted_ident('customer_name')} "
@@ -123,11 +136,11 @@ def _run(
         if (raw or "") != (new_v or ""):
             updates.append((row_id, raw, new_v))
 
-    print(f"총 행: {len(rows)}, 변경 대상: {len(updates)}")
-    _print_samples(updates, limit=samples, random_sample=random_sample)
+    _log_line(log, f"총 행: {len(rows)}, 변경 대상: {len(updates)}")
+    _print_samples(updates, limit=samples, random_sample=random_sample, log=log)
 
     if not apply:
-        print("(적용 안 함: --apply 로 실제 UPDATE)")
+        _log_line(log, "(적용 안 함: 미리보기만. 「고객사명 정규화 적용」 또는 --apply 로 실제 UPDATE)")
         return 0
 
     conn = sqlite3.connect(str(db_path))
@@ -149,13 +162,33 @@ def _run(
             cur.execute(sql, (new_v, row_id))
         if alias_upserts:
             n2 = _upsert_aliases(cur, alias_upserts)
-            print(f"[별칭] 변경분 alias {n2}건 upsert")
+            _log_line(log, f"[별칭] 변경분 alias {n2}건 upsert")
         conn.commit()
     finally:
         conn.close()
 
-    print(f"[완료] {len(updates)}건 UPDATE 반영")
+    _log_line(log, f"[완료] {len(updates)}건 UPDATE 반영")
     return 0
+
+
+def run_customer_name_normalize(
+    db_path: Path,
+    *,
+    apply: bool = False,
+    samples: int = 10,
+    random_sample: bool = False,
+    sync_default_aliases: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> int:
+    """GUI·스크립트 공용 진입점. ``log``가 있으면 콘솔 출력 대신 콜백만 호출한다."""
+    return _run(
+        db_path,
+        apply=apply,
+        samples=max(0, samples),
+        random_sample=random_sample,
+        sync_default_aliases=sync_default_aliases,
+        log=log,
+    )
 
 
 def main() -> int:
@@ -186,12 +219,13 @@ def main() -> int:
         help="DEFAULT_ALIASES(코드 내 매핑)를 customer_name_aliases에 upsert",
     )
     args = p.parse_args()
-    return _run(
+    return run_customer_name_normalize(
         args.db.resolve(),
         apply=args.apply,
-        samples=max(0, args.samples),
+        samples=args.samples,
         random_sample=args.random_sample,
         sync_default_aliases=bool(args.sync_default_aliases),
+        log=None,
     )
 
 

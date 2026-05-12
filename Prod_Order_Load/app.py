@@ -33,6 +33,7 @@ from sqlite_query import (
     fetch_distinct_column,
 )
 from version_info import get_version
+from tools.customer_name_sqlite_normalize import run_customer_name_normalize
 
 _FILTER_SPEC = [
     ("작업지시번호", "work_order_no"),
@@ -66,6 +67,9 @@ class App:
         self.output_filename = tk.StringVar(value=DEFAULT_OUTPUT_FILENAME)
         self.save_excel_var = tk.BooleanVar(value=False)
         self.running = False
+        self._cust_norm_running = False
+        self._cust_norm_probe_running = False
+        self._cust_norm_pending_count = 0
         self._last_output_path: Path | None = None
         self.sqlite_path_var = tk.StringVar(
             value=str((DEFAULT_OUTPUT_DIR / DEFAULT_OUTPUT_FILENAME).with_suffix(".sqlite"))
@@ -213,6 +217,13 @@ class App:
         ttk.Button(btn_row, text="콤보 목록 새로고침", command=self._reload_combos_from_current_db).pack(
             side=tk.LEFT
         )
+        self.btn_cust_apply = ttk.Button(
+            btn_row,
+            text="고객사명 정규화 검토/적용",
+            command=self._customer_name_normalize_apply,
+        )
+        # 기본적으로는 숨기고, DB에 정규화 필요 건이 있을 때만 노출한다.
+        self._set_customer_name_normalize_button_visible(False)
 
         fc = ttk.LabelFrame(tab_data, text="폴더 생성 (선택 행 기준: 기본경로/고객사_사업명/폴더명/하위폴더…)")
         fc.grid(row=3, column=0, sticky=tk.EW, padx=(520, 0))
@@ -675,8 +686,10 @@ class App:
         if p.is_file():
             self._reload_filter_options(p)
             self._load_tree_from_db()
+            self._refresh_customer_name_normalize_status()
             self.hint_var.set("저장된 DB를 불러왔습니다. 필요할 때만 「통합 실행」하세요.")
         else:
+            self._set_customer_name_normalize_button_visible(False)
             self.hint_var.set("DB 파일이 없습니다. 「통합 실행」으로 처음 생성할 수 있습니다.")
 
     def _update_last_merge_label(self, db_path: Path) -> None:
@@ -712,6 +725,7 @@ class App:
             messagebox.showwarning("파일 없음", "SQLite 경로를 확인하세요.")
             return
         self._reload_filter_options(p)
+        self._refresh_customer_name_normalize_status()
         self.hint_var.set("콤보 목록을 DB 기준으로 갱신했습니다.")
 
     def _sync_sqlite_path_from_output(self) -> None:
@@ -741,6 +755,7 @@ class App:
             self._update_last_merge_label(p)
             self._reload_filter_options(p)
             self._load_tree_from_db()
+            self._refresh_customer_name_normalize_status()
             self.hint_var.set(f"DB 경로 변경: {p.name}")
 
     def _reset_defaults(self) -> None:
@@ -888,6 +903,147 @@ class App:
     def _edit_source_paths(self) -> None:
         # 레거시: 기존 버튼을 없애면서도 외부 호출이 있으면 설정관리로 연결
         self._open_settings_manager()
+
+    def _set_customer_name_normalize_button_visible(self, visible: bool) -> None:
+        if visible:
+            self.btn_cust_apply.pack(side=tk.LEFT, padx=(16, 8))
+            return
+        self.btn_cust_apply.pack_forget()
+
+    def _extract_normalize_pending_count(self, lines: list[str]) -> int | None:
+        for line in lines:
+            if "변경 대상:" not in line:
+                continue
+            try:
+                rhs = line.split("변경 대상:", 1)[1]
+                return int(rhs.strip().split()[0].replace(",", ""))
+            except (ValueError, IndexError):
+                continue
+        return None
+
+    def _refresh_customer_name_normalize_status(self) -> None:
+        if self._cust_norm_probe_running or self._cust_norm_running:
+            return
+        db_str = (self.sqlite_path_var.get() or "").strip()
+        if not db_str:
+            self._cust_norm_pending_count = 0
+            self._set_customer_name_normalize_button_visible(False)
+            return
+        db_path = Path(db_str)
+        if not db_path.is_file():
+            self._cust_norm_pending_count = 0
+            self._set_customer_name_normalize_button_visible(False)
+            return
+
+        self._cust_norm_probe_running = True
+
+        def work() -> None:
+            lines: list[str] = []
+            rc = 1
+            try:
+                rc = run_customer_name_normalize(
+                    db_path.resolve(),
+                    apply=False,
+                    samples=0,
+                    random_sample=False,
+                    sync_default_aliases=False,
+                    log=lambda msg: lines.append(msg),
+                )
+            except Exception:
+                rc = 1
+
+            def done() -> None:
+                self._cust_norm_probe_running = False
+                if rc != 0:
+                    self._cust_norm_pending_count = 0
+                    self._set_customer_name_normalize_button_visible(False)
+                    return
+                pending = self._extract_normalize_pending_count(lines) or 0
+                self._cust_norm_pending_count = pending
+                self._set_customer_name_normalize_button_visible(pending > 0)
+
+            self.root.after(0, done)
+
+        Thread(target=work, daemon=True).start()
+
+    def _customer_name_normalize_apply(self) -> None:
+        if not messagebox.askyesno(
+            "고객사명 정규화 적용",
+            "현재 SQLite 경로의 consolidated_data.customer_name을\n"
+            "별칭·괄호 규칙에 따라 일괄 UPDATE합니다.\n\n"
+            "계속할까요?",
+        ):
+            return
+        self._customer_name_normalize_worker(apply=True)
+
+    def _show_normalize_result_window(self, title: str, lines: list[str]) -> None:
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("760x480")
+        win.transient(self.root)
+        txt = scrolledtext.ScrolledText(win, wrap=tk.WORD, height=22, width=96)
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 6))
+        txt.insert(tk.END, "\n".join(lines) if lines else "(출력 없음)")
+        txt.configure(state=tk.DISABLED)
+        ttk.Button(win, text="닫기", command=win.destroy).pack(pady=(0, 10))
+
+    def _customer_name_normalize_worker(self, *, apply: bool) -> None:
+        if self._cust_norm_running:
+            return
+        db_str = (self.sqlite_path_var.get() or "").strip()
+        if not db_str:
+            messagebox.showwarning(
+                "경로 없음",
+                "위 「SQLite 파일」 경로를 입력하거나 찾아보기로 선택하세요.",
+            )
+            return
+        db_path = Path(db_str)
+        self._cust_norm_running = True
+        self.btn_cust_apply.configure(state=tk.DISABLED)
+        self.hint_var.set("고객사명 정규화 처리 중…")
+
+        def work() -> None:
+            lines: list[str] = []
+            rc = 1
+            err_tb = ""
+            try:
+
+                def capture(msg: str) -> None:
+                    lines.append(msg)
+
+                rc = run_customer_name_normalize(
+                    db_path.resolve(),
+                    apply=apply,
+                    samples=15,
+                    random_sample=False,
+                    sync_default_aliases=False,
+                    log=capture,
+                )
+            except Exception as e:
+                err_tb = f"{e}\n{traceback.format_exc()}"
+
+            def done() -> None:
+                self._cust_norm_running = False
+                self.btn_cust_apply.configure(state=tk.NORMAL)
+                self.hint_var.set("")
+                if err_tb:
+                    messagebox.showerror("고객사명 정규화 오류", err_tb[:4000])
+                    return
+                if rc != 0:
+                    messagebox.showwarning(
+                        "고객사명 정규화",
+                        "\n".join(lines) if lines else "실패했습니다.",
+                    )
+                    return
+                title = "고객사명 정규화 적용 완료" if apply else "고객사명 정규화 미리보기"
+                self._show_normalize_result_window(title, lines)
+                if apply:
+                    self._load_tree_from_db()
+                    self._refresh_customer_name_normalize_status()
+
+            self.root.after(0, done)
+
+        Thread(target=work, daemon=True).start()
 
     def _run(self) -> None:
         if self.running:
