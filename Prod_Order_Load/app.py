@@ -616,14 +616,14 @@ class App:
                 err_tail = str(e)
             ok_p, sk, errs = 0, 0, []
             if not err_tail:
-                pairs = [(it["group"], it["folder"]) for it in items]
-                actual_subs = subs if create_subfolder else []
-                ok_p, sk, errs = create_folder_structure_grouped(
-                    Path(base_str),
-                    pairs,
-                    actual_subs,
-                    log=self._log,
-                )
+                if create_subfolder:
+                    pairs = [(it["group"], it["folder"]) for it in items]
+                    ok_p, sk, errs = create_folder_structure_grouped(
+                        Path(base_str),
+                        pairs,
+                        subs,
+                        log=self._log,
+                    )
                 base = Path(base_str)
                 for it in items:
                     group_dir = base / it["group"]
