@@ -65,7 +65,6 @@ class App:
 
         self.output_dir = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR))
         self.output_filename = tk.StringVar(value=DEFAULT_OUTPUT_FILENAME)
-        self.save_excel_var = tk.BooleanVar(value=True)
         self.running = False
         self._cust_norm_running = False
         self._cust_norm_probe_running = False
@@ -180,14 +179,13 @@ class App:
 
         ttk.Label(job, text="파일명(.xlsx):").grid(row=0, column=3, sticky=tk.W, padx=4, pady=2)
         ttk.Entry(job, textvariable=self.output_filename).grid(row=0, column=4, sticky=tk.EW, padx=4, pady=2)
-        ttk.Checkbutton(job, text="엑셀도 저장", variable=self.save_excel_var).grid(row=0, column=5, sticky=tk.W)
 
         btns = ttk.Frame(job)
         btns.grid(row=1, column=0, columnspan=6, sticky=tk.W, padx=4, pady=(4, 2))
         self.btn_run = ttk.Button(btns, text="통합 실행 (SQLite 갱신)", command=self._run)
         self.btn_run.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btns, text="설정 관리...", command=self._open_settings_manager).pack(side=tk.LEFT, padx=(0, 8))
-        self.btn_open_result = ttk.Button(btns, text="결과 엑셀 열기", command=self._open_result_file, state=tk.DISABLED)
+        self.btn_open_result = ttk.Button(btns, text="결과 엑셀 열기", command=self._open_result_file)
         self.btn_open_result.pack(side=tk.LEFT)
 
         self.status_var = tk.StringVar(value="상태: 대기 중")
@@ -771,12 +769,22 @@ class App:
         self._sync_sqlite_path_from_output()
         self.hint_var.set("기본 경로/파일명으로 복원했습니다.")
 
+    def _get_output_excel_path(self) -> Path:
+        """현재 UI 설정 기준 엑셀 출력 경로."""
+        out_dir = (self.output_dir.get() or "").strip()
+        out_name = (self.output_filename.get() or "").strip() or DEFAULT_OUTPUT_FILENAME
+        if not out_name.lower().endswith(".xlsx"):
+            out_name += ".xlsx"
+        return Path(out_dir) / out_name
+
     def _open_result_file(self) -> None:
         p = self._last_output_path
         if not p or not p.is_file():
+            p = self._get_output_excel_path()
+        if not p.is_file():
             messagebox.showwarning(
                 "파일 없음",
-                "엑셀을 저장한 실행만 열 수 있습니다.\n「엑셀 파일도 함께 저장」을 켜고 통합해 주세요.",
+                f"엑셀 파일이 없습니다.\n{p}\n\n통합 실행으로 먼저 생성해 주세요.",
             )
             return
         try:
@@ -1065,11 +1073,9 @@ class App:
         self.output_filename.set(out_name)
         output_path = Path(out_dir) / out_name
         self._sync_sqlite_path_from_output()
-        save_xlsx = bool(self.save_excel_var.get())
 
         self.running = True
         self.btn_run.configure(state=tk.DISABLED)
-        self.btn_open_result.configure(state=tk.DISABLED)
         self._last_output_path = None
         self.status_var.set("상태: 통합 실행 중...")
         self.hint_var.set("통합 중…")
@@ -1080,12 +1086,12 @@ class App:
             ok = False
             err_tb = ""
             try:
-                ok = process_folders(output_path, self._log, save_excel=save_xlsx)
+                ok = process_folders(output_path, self._log, save_excel=True)
             except Exception as e:
                 err_tb = f"{e}\n{traceback.format_exc()}"
             finally:
                 sqlite_path = output_path.with_suffix(".sqlite")
-                excel_ok = save_xlsx and ok and output_path.is_file()
+                excel_ok = ok and output_path.is_file()
                 sqlite_ok = ok and sqlite_path.is_file()
 
                 def _done() -> None:
@@ -1095,10 +1101,6 @@ class App:
                     self.btn_run.configure(state=tk.NORMAL)
                     if excel_ok:
                         self._last_output_path = output_path
-                        self.btn_open_result.configure(state=tk.NORMAL)
-                    else:
-                        self._last_output_path = None
-                        self.btn_open_result.configure(state=tk.DISABLED)
                     if err_tb:
                         self.hint_var.set("통합 중 오류가 발생했습니다.")
                         messagebox.showerror("통합 오류", err_tb[:4000])
