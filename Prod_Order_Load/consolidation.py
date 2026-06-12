@@ -28,7 +28,6 @@ from config import (
     SHEET_HEADER_ALIASES_PER_COL,
     STANDARD_HEADERS,
 )
-from assembly_schedule_parse import parse_assembly_schedule_cell
 from date_norm import clean_date_text, normalize_date_to_iso, parse_to_datetime
 from order_spec_split import split_order_spec_cell
 from sqlite_export import material_receipt_cell_int, save_consolidated_to_sqlite, load_customer_name_alias_map
@@ -37,6 +36,43 @@ from field_change_strip import strip_field_change_suffix
 
 import json
 import sqlite3
+
+# ---------------------------------------------------------------------------
+# 조립공정일정 셀 파싱 (구 assembly_schedule_parse 모듈 통합)
+# ---------------------------------------------------------------------------
+_LABEL_PATTERN = re.compile(
+    r"^\s*(자재검수|SMT|IMT|검사)\s*[:：]\s*(.*)$",
+)
+
+
+def parse_assembly_schedule_cell(raw) -> tuple[str | None, str | None, str | None, str | None]:
+    """
+    조립공정일정 셀(여러 줄) → (자재검수, SMT, IMT, 검사) 각각 YYYY-MM-DD 또는 None.
+    """
+    if raw is None:
+        return (None, None, None, None)
+    s = str(raw).strip()
+    if not s:
+        return (None, None, None, None)
+
+    slots: dict[str, str | None] = {
+        "자재검수": None, "SMT": None, "IMT": None, "검사": None,
+    }
+    for line in re.split(r"\r\n|\n|\r", s):
+        line = line.strip()
+        if not line:
+            continue
+        m = _LABEL_PATTERN.match(line)
+        if not m:
+            continue
+        label, rest = m.group(1), (m.group(2) or "").strip()
+        if not rest:
+            slots[label] = None
+            continue
+        iso = normalize_date_to_iso(clean_date_text(rest))
+        slots[label] = iso if iso else None
+
+    return (slots["자재검수"], slots["SMT"], slots["IMT"], slots["검사"])
 
 
 # --- 헤더 별칭: 소스 시트에 적힌 이름 → 기준 열 번호(1-based) ---
@@ -113,14 +149,22 @@ def _parse_date_from_sheet_and_book(sheet_name: str, book_name: str) -> str:
 
 
 # 작업지시번호: 문자(영문·한글) 1~2자 + "-" + 숫자4자리 + "-" + 숫자4자리 (예: AB-1234-5678, 지-0001-0002)
-_WORK_ORDER_NO_PATTERN = re.compile(r"^[A-Za-z가-힣]{1,2}-\d{4}-\d{4}$")
+_WORK_ORDER_NO_PREFIX = re.compile(r"^([A-Za-z가-힣]{1,2}-\d{4}-\d{4})")
+
+
+def _extract_work_order_no(val) -> str | None:
+    """셀 앞부분에서 작업지시번호 패턴만 추출. 뒤의 변경 이력·줄바꿈 등은 버린다."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = _WORK_ORDER_NO_PREFIX.match(s)
+    return m.group(1) if m else None
 
 
 def _is_valid_work_order_no(val) -> bool:
-    if val is None:
-        return False
-    s = str(val).strip()
-    return bool(_WORK_ORDER_NO_PATTERN.fullmatch(s))
+    return _extract_work_order_no(val) is not None
 
 
 def _apply_autofilter_and_style(ws, log: Callable[[str], None], sheet_label: str) -> None:
@@ -311,8 +355,10 @@ def process_folders(
                         if job_col_idx and job_col_idx < len(row_data)
                         else None
                     )
-                    if not _is_valid_work_order_no(job_val):
+                    job_no = _extract_work_order_no(job_val)
+                    if not job_no:
                         continue
+                    row_data[job_col_idx] = job_no
                     try:
                         dci = STANDARD_HEADERS.index("created_date") + 1
                     except ValueError:

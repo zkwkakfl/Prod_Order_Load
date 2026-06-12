@@ -27,13 +27,26 @@ from folder_create import (
     create_blank_workbook,
 )
 from consolidation import process_folders
+from sqlite_export import build_folder_bom_issue_labels
 from sqlite_query import (
     query_consolidated,
     get_last_exported_at,
     fetch_distinct_column,
 )
-from version_info import get_version
 from tools.customer_name_sqlite_normalize import run_customer_name_normalize
+
+
+def get_version() -> str:
+    """VERSION 파일에서 SemVer 문자열 읽기 (PyInstaller 호환)."""
+    try:
+        if getattr(sys, "frozen", False):
+            vf = Path(sys._MEIPASS) / "VERSION"
+        else:
+            vf = Path(__file__).resolve().parent / "VERSION"
+        text = vf.read_text(encoding="utf-8").strip()
+        return text or "0.0.0"
+    except OSError:
+        return "0.0.0"
 
 _FILTER_SPEC = [
     ("작업지시번호", "work_order_no"),
@@ -491,10 +504,8 @@ class App:
     def _collect_folder_items_from_rows(self, cols: list[str], rows: list[tuple]) -> list[dict]:
         # 폴더 생성 + 파일 복사/표지입력에 필요한 컬럼
         required_cols = (
-            "folder_label",
             "customer_name",
             "project_name",
-            "bom_file_label",
             "work_order_no",
             "product_name",
             "part_no",
@@ -512,10 +523,8 @@ class App:
                 )
                 return []
 
-        i_folder = cols.index("folder_label")
         i_cust = cols.index("customer_name")
         i_biz = cols.index("project_name")
-        i_bom = cols.index("bom_file_label")
         i_job = cols.index("work_order_no")
         i_prod = cols.index("product_name")
         i_code = cols.index("part_no")
@@ -527,13 +536,18 @@ class App:
 
         out: list[dict] = []
         for row in rows:
-            folder = row[i_folder] if i_folder < len(row) else None
             cust = row[i_cust] if i_cust < len(row) else None
             biz = row[i_biz] if i_biz < len(row) else None
+            folder, bom_name, _issue = build_folder_bom_issue_labels(
+                product_name=row[i_prod] if i_prod < len(row) else None,
+                part_no=row[i_code] if i_code < len(row) else None,
+                work_order_no=row[i_job] if i_job < len(row) else None,
+                customer_name=cust,
+                project_name=biz,
+            )
             if folder is None or str(folder).strip() == "":
                 continue
             group = self._make_group_name("" if cust is None else str(cust), "" if biz is None else str(biz))
-            bom_name = row[i_bom] if i_bom < len(row) else None
             p_values = [
                 "" if row[i_job] is None else str(row[i_job]),
                 "" if cust is None else str(cust),

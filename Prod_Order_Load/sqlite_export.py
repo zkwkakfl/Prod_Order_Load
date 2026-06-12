@@ -20,6 +20,7 @@ from field_change_strip import strip_field_change_suffix
 CONSOLIDATED_TABLE = "consolidated_data"
 FIELD_CHANGE_LOG_TABLE = "field_change_log"
 CUSTOMER_NAME_ALIASES_TABLE = "customer_name_aliases"
+_COMPUTED_LABEL_COLS = frozenset({"folder_label", "bom_file_label", "release_list_label"})
 
 
 def parse_material_receipt_qty(head: str | None) -> int | None:
@@ -62,18 +63,55 @@ def _get_cell(row_data: list, col_name: str):
     return None
 
 
-def _computed_folder_bom_issue(row_data: list) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """엑셀 수식과 동일한 조합 규칙."""
-    name = _get_cell(row_data, "product_name")
-    code = _get_cell(row_data, "part_no")
-    job = _get_cell(row_data, "work_order_no")
-    cust = _get_cell(row_data, "customer_name")
-    proj = _get_cell(row_data, "project_name")
+def _clean_label_value(v) -> str | None:
+    """폴더명·BOM파일명·발행리스트 조합용: 변경 꼬리 제거 후 문자열."""
+    if v is None:
+        return None
+    sv = _stringify_for_strip(v)
+    if not sv:
+        return None
+    head, _ = strip_field_change_suffix(sv)
+    if head is None:
+        return None
+    s = str(head).strip()
+    return s if s else None
+
+
+def build_folder_bom_issue_labels(
+    *,
+    product_name=None,
+    part_no=None,
+    work_order_no=None,
+    customer_name=None,
+    project_name=None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    폴더명·BOM파일명·발행리스트 문자열 생성.
+    - folder_label: 품명(품번)
+    - bom_file_label: 작업지시번호 고객사_품명(품번)
+    - release_list_label: 사업명-품명(품번) (사업명 없으면 folder와 동일)
+    """
+    name = _clean_label_value(product_name)
+    code = _clean_label_value(part_no)
+    job = _clean_label_value(work_order_no)
+    cust = _clean_label_value(customer_name)
+    proj = _clean_label_value(project_name)
 
     folder = f"{name}({code})" if name and code else None
     bom = f"{job} {cust}_{name}({code})" if job and cust and name and code else None
     issue = (f"{proj}-{name}({code})" if proj else f"{name}({code})") if name and code else None
     return folder, bom, issue
+
+
+def _computed_folder_bom_issue(row_data: list) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """엑셀 수식과 동일한 조합 규칙."""
+    return build_folder_bom_issue_labels(
+        product_name=_get_cell(row_data, "product_name"),
+        part_no=_get_cell(row_data, "part_no"),
+        work_order_no=_get_cell(row_data, "work_order_no"),
+        customer_name=_get_cell(row_data, "customer_name"),
+        project_name=_get_cell(row_data, "project_name"),
+    )
 
 
 def _value_for_sql(v) -> Optional[str]:
@@ -247,13 +285,6 @@ def save_consolidated_to_sqlite(
     col_names = list(STANDARD_HEADERS)
     exported_iso = datetime.now().isoformat(timespec="seconds")
 
-    folder_v, bom_v, issue_v = [], [], []
-    for row_data in rows:
-        f, b, i = _computed_folder_bom_issue(row_data)
-        folder_v.append(f)
-        bom_v.append(b)
-        issue_v.append(i)
-
     cols_sql = [
         "id INTEGER PRIMARY KEY AUTOINCREMENT",
         f'{_quoted_ident("update_at")} TEXT NOT NULL',
@@ -283,14 +314,26 @@ def save_consolidated_to_sqlite(
         log(f"[SQLite 오류] 폴더 준비 실패: {db_path.parent} - {e}")
         return False
 
-    def _append_stripped_string(raw: Optional[str], h: str, audits: list[tuple[str, str]], out: list) -> None:
-        if raw is None:
-            out.append(None)
-            return
-        head, tail = strip_field_change_suffix(str(raw))
+    def _normalize_row_field(
+        h: str, v, alias_map: dict[str, str]
+    ) -> tuple[object | None, list[tuple[str, str]]]:
+        audits: list[tuple[str, str]] = []
+        if v is None:
+            return None, audits
+        sv = _stringify_for_strip(v)
+        if not sv:
+            return None, audits
+        head, tail = strip_field_change_suffix(sv)
         if tail:
             audits.append((h, tail))
-        out.append(_value_for_sql(head if head is not None else None))
+        if h == "created_date":
+            iso = normalize_date_to_iso(head) if head else None
+            return iso if iso is not None else head, audits
+        if h == "material_receipt_note":
+            return parse_material_receipt_qty(head), audits
+        if h == "customer_name":
+            return canonicalize_customer_name(head, alias_map), audits
+        return head if head is not None else None, audits
 
     try:
         conn = sqlite3.connect(str(db_path))
@@ -306,59 +349,32 @@ def save_consolidated_to_sqlite(
             ensure_field_change_log_table(cur)
             for i, row_data in enumerate(rows):
                 audits: list[tuple[str, str]] = []
-                vals: list = [exported_iso]
+                norm: dict[str, object | None] = {}
                 for j, h in enumerate(col_names, start=1):
-                    if h == "folder_label":
-                        _append_stripped_string(folder_v[i], h, audits, vals)
-                    elif h == "bom_file_label":
-                        _append_stripped_string(bom_v[i], h, audits, vals)
-                    elif h == "release_list_label":
-                        _append_stripped_string(issue_v[i], h, audits, vals)
-                    elif h == "created_date":
-                        v = row_data[j] if j < len(row_data) else None
-                        if v is None:
-                            vals.append(None)
-                        else:
-                            sv = _stringify_for_strip(v)
-                            if not sv:
-                                vals.append(None)
-                            else:
-                                head, tail = strip_field_change_suffix(sv)
-                                if tail:
-                                    audits.append((h, tail))
-                                iso = normalize_date_to_iso(head) if head else None
-                                vals.append(_value_for_sql(iso if iso is not None else head))
-                    elif h == "material_receipt_note":
-                        v = row_data[j] if j < len(row_data) else None
-                        if v is None:
-                            vals.append(None)
-                        else:
-                            sv = _stringify_for_strip(v)
-                            head, tail = strip_field_change_suffix(sv)
-                            if tail:
-                                audits.append((h, tail))
-                            vals.append(parse_material_receipt_qty(head))
-                    elif h == "customer_name":
-                        v = row_data[j] if j < len(row_data) else None
-                        if v is None:
-                            vals.append(None)
-                        else:
-                            sv = _stringify_for_strip(v)
-                            head, tail = strip_field_change_suffix(sv)
-                            if tail:
-                                audits.append((h, tail))
-                            canon = canonicalize_customer_name(head, alias_map)
-                            vals.append(_value_for_sql(canon))
+                    if h in _COMPUTED_LABEL_COLS:
+                        continue
+                    v = row_data[j] if j < len(row_data) else None
+                    norm[h], field_audits = _normalize_row_field(h, v, alias_map)
+                    audits.extend(field_audits)
+
+                folder, bom, issue = build_folder_bom_issue_labels(
+                    product_name=norm.get("product_name"),
+                    part_no=norm.get("part_no"),
+                    work_order_no=norm.get("work_order_no"),
+                    customer_name=norm.get("customer_name"),
+                    project_name=norm.get("project_name"),
+                )
+                norm["folder_label"] = folder
+                norm["bom_file_label"] = bom
+                norm["release_list_label"] = issue
+
+                vals: list = [exported_iso]
+                for h in col_names:
+                    val = norm.get(h)
+                    if h == "material_receipt_note":
+                        vals.append(val)
                     else:
-                        v = row_data[j] if j < len(row_data) else None
-                        if v is None:
-                            vals.append(None)
-                        else:
-                            sv = _stringify_for_strip(v)
-                            head, tail = strip_field_change_suffix(sv)
-                            if tail:
-                                audits.append((h, tail))
-                            vals.append(_value_for_sql(head if head is not None else None))
+                        vals.append(_value_for_sql(val))
                 cur.execute(insert_sql, vals)
                 rid = int(cur.lastrowid)
                 wo_val = vals[wo_idx_in_vals]

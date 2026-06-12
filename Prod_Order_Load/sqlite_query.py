@@ -12,13 +12,10 @@ from typing import Any
 
 from config import SCHEDULE_HEADER_FIELDS
 from date_norm import parse_to_datetime
+from sqlite_export import _quoted_ident as _qi
 
 CONSOLIDATED_TABLE = "consolidated_data"
 _DATE_SORT_COLUMNS = frozenset(("created_date", *SCHEDULE_HEADER_FIELDS))
-
-
-def _qi(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
 
 
 def list_columns(conn: sqlite3.Connection) -> list[str]:
